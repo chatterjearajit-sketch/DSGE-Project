@@ -1,0 +1,156 @@
+import numpy as np
+
+def kalman_log_likelihood(y, A, B, C, Q_shocks, R, x0=None, P0=None):
+    """
+    Compute the log-likelihood of observed data y under a linear state-space model using the Kalman filter.
+    
+    Parameters
+    ----------
+    y : np.ndarray
+        Observed data, shape (n_obs, T)
+    A : np.ndarray
+        State transition matrix (should be the solved rational expectations solution)
+    B : np.ndarray
+        Shock transition matrix
+    C : np.ndarray
+        Observation matrix
+    Q_shocks : np.ndarray
+        Covariance matrix of structural shocks
+    R : np.ndarray
+        Covariance matrix of observation noise
+    x0 : np.ndarray or None
+        Initial state estimate
+    P0 : np.ndarray or None
+        Initial covariance estimate
+        
+    Returns
+    -------
+    log_likelihood : float
+        Kalman log-likelihood
+    """
+    n_obs, T = y.shape
+    n_state = A.shape[0]
+    
+    # Convert shock covariance to process noise covariance
+    Q = B @ Q_shocks @ B.T
+
+    if x0 is None:
+        x_hat = np.zeros((n_state, 1))
+    else:
+        x_hat = x0.reshape(-1, 1)
+
+    if P0 is None:
+        # Initialize with stationary covariance if possible
+        # For now, use large uncertainty
+        P = np.eye(n_state) * 100
+    else:
+        P = P0
+
+    log_likelihood = 0.0
+
+    for t in range(T):
+        y_t = y[:, [t]]
+
+        # Prediction step
+        x_pred = A @ x_hat
+        P_pred = A @ P @ A.T + Q
+
+        # Innovation
+        y_pred = C @ x_pred
+        e_t = y_t - y_pred
+        S = C @ P_pred @ C.T + R
+
+        # Check for numerical issues
+        try:
+            S_inv = np.linalg.inv(S)
+        except np.linalg.LinAlgError:
+            # Handle near-singular matrix
+            S_inv = np.linalg.pinv(S)
+
+        # Kalman gain
+        K = P_pred @ C.T @ S_inv
+
+        # Update step
+        x_hat = x_pred + K @ e_t
+        I_KC = np.eye(n_state) - K @ C
+        P = I_KC @ P_pred @ I_KC.T + K @ R @ K.T  # Joseph form for numerical stability
+
+        # Log-likelihood contribution
+        sign, logdet = np.linalg.slogdet(S)
+        if sign <= 0:
+            return -np.inf  # Return very low likelihood instead of error
+            
+        ll_contrib = -0.5 * (n_obs * np.log(2 * np.pi) + logdet + e_t.T @ S_inv @ e_t)
+        log_likelihood += ll_contrib.item()
+
+    return log_likelihood
+
+# Example of how to properly set up the system:
+def solve_dsge_example():
+    """
+    Example showing how to properly solve a simple DSGE model
+    This is a placeholder - you need actual rational expectations solution
+    """
+    # Your parameters
+    beta = 0.99
+    sigma = 1.5
+    phi_pi = 1.5
+    phi_y = 0.5
+    kappa = 0.1
+    rho_r = 0.75
+    rho_a = 0.85
+    rho_u = 0.8
+    
+    # This is where you would implement the rational expectations solution
+    # For now, showing the structure you need:
+    
+    # After solving RE model, you get a reduced form:
+    # s_{t+1} = A_solved @ s_t + B @ e_t
+    # where A_solved incorporates the forward-looking behavior
+    
+    # Placeholder - replace with actual RE solution
+    A_solved = np.array([
+        [0.9, 0.1, 0.0, 0.0, 0.0, 0.0],
+        [0.1, 0.8, 0.0, 0.0, 0.0, 0.1],
+        [0.5, 1.5, 0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, rho_a, 0.0],
+        [0.0, 0.0, 0.0, 0.0, rho_a, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0, rho_u]
+    ])
+    
+    # B matrix (shock structure)
+    B = np.array([
+        [0, 0, 0],
+        [0, 0, 0],
+        [1, 0, 0],
+        [0, 0, 0],
+        [0, 1, 0],
+        [0, 0, 1]
+    ])
+    
+    # C matrix (observation)
+    C = np.array([
+        [0, 1, 0, 0, 0, 0],  # π_t
+        [1, 0, 0, 0, 0, 0],  # x_t  
+        [0, 0, 1, 0, 0, 0]   # i_t
+    ])
+    
+    # Shock covariances
+    Q_shocks = np.diag([0.01, 0.01, 0.01])
+    R = np.diag([0.001, 0.001, 0.001])
+    
+    return A_solved, B, C, Q_shocks, R
+
+# Test with simulated data
+if __name__ == "__main__":
+    A, B, C, Q_shocks, R = solve_dsge_example()
+    
+    # Generate some fake data for testing
+    T = 100
+    n_obs = 3
+    np.random.seed(42)
+    y_test = np.random.randn(n_obs, T) * 0.01
+    
+    # Compute log-likelihood
+    ll = kalman_log_likelihood(y_test, A, B, C, Q_shocks, R)
+    print(f"Log-likelihood: {ll:.2f}")
