@@ -1,0 +1,59 @@
+# Blanchard-Kahn Analysis for a Medium-Scale DSGE Core Model
+
+import numpy as np
+from scipy.linalg import ordqz
+
+# === Parameter Calibration ===
+beta = 0.99          # Discount factor
+sigma = 1.0          # Intertemporal elasticity inverse
+kappa = 0.1          # Slope of Phillips curve
+phi_pi = 1.5         # Taylor rule response to inflation
+phi_y = 0.5          # Taylor rule response to output
+rho = 0.8            # Interest rate smoothing
+
+# === Define A and B matrices ===
+# Variables ordered as:
+# [x_{t+1}, pi_{t+1}, x_t, pi_t, i_t, i_{t-1}]
+
+# Matrix A (expectation-side)
+A = np.zeros((6, 6))
+A[0, 0] = 1.0                   # x_{t+1} in IS
+A[0, 1] = 1.0 / sigma           # pi_{t+1} in IS
+A[1, 1] = beta                  # pi_{t+1} in Phillips
+A[3, 3] = 1.0                   # Identity row for pi_t
+A[4, 4] = 1.0                   # Identity row for i_t
+A[5, 5] = 1.0                   # Identity row for i_{t-1}
+
+# Matrix B (contemporaneous-side)
+B = np.zeros((6, 6))
+B[0, 2] = -1.0                                 # x_t in IS
+B[0, 4] = -1.0 / sigma                         # i_t in IS
+B[1, 2] = kappa                                # x_t in Phillips
+B[1, 3] = -1.0                                 # pi_t in Phillips
+B[2, 2] = phi_y * (1 - rho)                    # x_t in Taylor rule
+B[2, 3] = phi_pi * (1 - rho)                   # pi_t in Taylor rule
+B[2, 4] = -1.0                                 # i_t in Taylor rule
+B[2, 5] = rho                                  # i_{t-1} in Taylor rule
+B[3, 3] = 1.0                                   # identity
+B[4, 4] = 1.0                                   # identity
+B[5, 5] = 1.0                                   # identity
+
+# === QZ Decomposition and Eigenvalue Calculation ===
+S, T, alpha, beta_qz, Q, Z = ordqz(A, B, sort='ouc')
+eigvals = alpha / beta_qz
+
+# === Print Eigenvalues and Count Unstable Roots ===
+print("Generalized Eigenvalues (α/β):")
+print(eigvals)
+
+unstable_roots = np.sum(np.abs(eigvals) > 1.00001)
+print(f"\nNumber of unstable roots: {unstable_roots}")
+
+n_forward_looking = 2  # [x_{t+1}, pi_{t+1}]
+
+if unstable_roots == n_forward_looking:
+    print("✅ Blanchard-Kahn conditions satisfied: Unique and stable equilibrium.")
+elif unstable_roots > n_forward_looking:
+    print("⚠️ Multiple equilibria: Too many unstable roots.")
+else:
+    print("❌ Indeterminacy: Not enough unstable roots.")
