@@ -1,0 +1,27 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+def impulse_response(A, shock_index=0, T=20):
+    d = A.shape[0]
+    responses = np.zeros((T, d))
+    impulse = np.zeros(d)
+    impulse[shock_index] = 1.0  # unit shock
+    
+    for t in range(T):
+        responses[t] = impulse
+        impulse = A @ impulse
+
+    return responses
+
+# Example: simulate IRF
+A_posterior_mean = np.array([[0.8, 0.1],
+                             [0.05, 0.7]])
+responses = impulse_response(A_posterior_mean, shock_index=0, T=20)
+
+plt.plot(responses)
+plt.title("Posterior Impulse Responses from Latent Matrix A")
+plt.xlabel("Time")
+plt.ylabel("Response")
+plt.legend([f'z{i}' for i in range(A_posterior_mean.shape[0])])
+plt.grid()
+plt.show()
