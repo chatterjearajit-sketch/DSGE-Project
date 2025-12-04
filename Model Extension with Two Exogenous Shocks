@@ -1,0 +1,177 @@
+# Install numpyro first: pip install numpyro
+
+import jax
+import jax.numpy as jnp
+from jax import random
+import numpy as np
+import matplotlib.pyplot as plt
+
+import numpyro
+from numpyro.infer import MCMC, NUTS
+from numpyro import sample, plate
+from numpyro.distributions import Beta, LogNormal, Normal, Uniform, Exponential
+
+# --- Step 1: Simulate Data ---
+
+def simulate_dgp(T=100, seed=42):
+    key = random.PRNGKey(seed)
+    keys = random.split(key, 3)
+
+    # True parameters
+    β = 0.99
+    σ = 1.5
+    κ = 0.3
+    φ_π = 1.5
+    φ_x = 0.5
+    ρ_r = 0.5
+    ρ_a = 0.9
+    ρ_u = 0.4
+
+    # Generate all shocks at once
+    ε_r = random.normal(keys[0], shape=(T,)) * 0.01
+    ε_a = random.normal(keys[1], shape=(T,)) * 0.01
+    ε_u = random.normal(keys[2], shape=(T,)) * 0.01
+
+    # Initialize arrays
+    π = jnp.zeros(T)
+    x = jnp.zeros(T)
+    i = jnp.zeros(T)
+    a = jnp.zeros(T)
+
+    # Use lax.scan for efficient looping
+    def step(carry, t):
+        π_prev, x_prev, a_prev = carry
+        
+        # Technology shock
+        a_t = ρ_a * a_prev + ε_a[t]
+        r_n = a_t
+        
+        # DSGE equations
+        π_t = β * π_prev + κ * x_prev + ε_u[t]
+        i_t = φ_π * π_t + φ_x * x_prev + ε_r[t]
+        x_t = x_prev - (1/σ) * (i_t - β * π_t - r_n)
+        
+        return (π_t, x_t, a_t), (π_t, x_t, i_t, a_t)
+    
+    # Run the simulation
+    init_state = (0.0, 0.0, 0.0)
+    _, (π_sim, x_sim, i_sim, a_sim) = jax.lax.scan(step, init_state, jnp.arange(1, T))
+    
+    # Concatenate with initial zeros
+    π = jnp.concatenate([jnp.array([0.0]), π_sim])
+    x = jnp.concatenate([jnp.array([0.0]), x_sim])
+    i = jnp.concatenate([jnp.array([0.0]), i_sim])
+    
+    return {'π': π, 'x': x, 'i': i}
+
+# --- Step 2: NumPyro Model ---
+
+def dsge_model(data):
+    T = len(data['π'])
+
+    # Priors
+    β = sample("β", Beta(99, 2))  # Prior centered around 0.99
+    σ = sample("σ", LogNormal(0.0, 0.5))
+    κ = sample("κ", Normal(0.3, 0.1))
+    φ_π = sample("φ_π", Normal(1.5, 0.3))
+    φ_x = sample("φ_x", Normal(0.5, 0.2))
+    ρ_a = sample("ρ_a", Uniform(0.6, 0.99))
+    ρ_u = sample("ρ_u", Uniform(0.2, 0.7))
+
+    # Shock standard deviations
+    σ_u = sample("σ_u", Exponential(100.))  # Tighter prior
+    σ_r = sample("σ_r", Exponential(100.))
+    σ_a = sample("σ_a", Exponential(100.))
+
+    # Sample all shocks at once for efficiency
+    with plate("time", T-1):
+        ε_u = sample("ε_u", Normal(0, σ_u))
+        ε_r = sample("ε_r", Normal(0, σ_r))
+        ε_a = sample("ε_a", Normal(0, σ_a))
+
+    # Forward simulation using lax.scan
+    def forward_step(carry, t):
+        π_prev, x_prev, a_prev = carry
+        
+        # Technology shock
+        a_t = ρ_a * a_prev + ε_a[t-1]  # t-1 because ε arrays are length T-1
+        r_n = a_t
+        
+        # DSGE equations
+        π_t = β * π_prev + κ * x_prev + ε_u[t-1]
+        i_t = φ_π * π_t + φ_x * x_prev + ε_r[t-1]
+        x_t = x_prev - (1/σ) * (i_t - β * π_t - r_n)
+        
+        return (π_t, x_t, a_t), (π_t, x_t, i_t)
+    
+    # Run forward simulation
+    init_state = (0.0, 0.0, 0.0)
+    _, (π_sim, x_sim, i_sim) = jax.lax.scan(forward_step, init_state, jnp.arange(1, T))
+    
+    # Concatenate with initial zeros
+    π_pred = jnp.concatenate([jnp.array([0.0]), π_sim])
+    x_pred = jnp.concatenate([jnp.array([0.0]), x_sim])
+    
+    # Likelihood - use small but positive observation noise
+    obs_noise = 0.01
+    sample("obs_π", Normal(π_pred, obs_noise), obs=data['π'])
+    sample("obs_x", Normal(x_pred, obs_noise), obs=data['x'])
+
+# --- Step 3: Run Inference ---
+
+def run_estimation():
+    # Generate data
+    print("Generating synthetic data...")
+    data = simulate_dgp(T=50)  # Smaller T for faster inference
+    
+    # Plot the data
+    fig, axes = plt.subplots(3, 1, figsize=(10, 8))
+    
+    axes[0].plot(data['π'])
+    axes[0].set_title('Inflation (π)')
+    axes[0].grid(True)
+    
+    axes[1].plot(data['x'])
+    axes[1].set_title('Output Gap (x)')
+    axes[1].grid(True)
+    
+    axes[2].plot(data['i'])
+    axes[2].set_title('Interest Rate (i)')
+    axes[2].grid(True)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Run MCMC
+    print("Running MCMC estimation...")
+    nuts_kernel = NUTS(dsge_model, target_accept_prob=0.8)
+    mcmc = MCMC(nuts_kernel, num_warmup=500, num_samples=1000, num_chains=2)
+    
+    mcmc.run(random.PRNGKey(1), data=data)
+    mcmc.print_summary()
+    
+    # Get posterior samples
+    posterior = mcmc.get_samples()
+    
+    # Plot posterior distributions
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    axes = axes.flatten()
+    
+    params = ['β', 'σ', 'κ', 'φ_π', 'φ_x', 'ρ_a']
+    true_values = [0.99, 1.5, 0.3, 1.5, 0.5, 0.9]
+    
+    for i, (param, true_val) in enumerate(zip(params, true_values)):
+        axes[i].hist(posterior[param], bins=50, alpha=0.7, density=True)
+        axes[i].axvline(true_val, color='red', linestyle='--', label=f'True: {true_val}')
+        axes[i].set_title(f'{param}')
+        axes[i].legend()
+        axes[i].grid(True)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return posterior, data
+
+# Run the estimation
+if __name__ == "__main__":
+    posterior, data = run_estimation()
