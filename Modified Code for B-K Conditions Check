@@ -1,0 +1,53 @@
+import numpy as np
+from scipy.linalg import qz
+
+# Define the baseline system matrix A_template (4x4)
+# Variables: [x_t, pi_t, i_t, i_{t-1}]
+# Model: IS curve, Phillips curve, Taylor rule, lagged interest rate
+A_template = np.array([
+    [0.5, -0.5, -0.5, 0.0],     # IS curve
+    [0.05, 0.98, -0.05, 0.0],   # Phillips curve
+    [0.2, 1.2, 0.0, 0.8],       # Taylor rule
+    [0.0, 0.0, 1.0, 0.0]        # Lagged interest rate
+])
+
+# Define B matrix for shock impact (assumed 2 shocks: tech and monetary)
+B = np.zeros((4, 2))
+B[:, 0] = [1.0, 0.0, 0.0, 0.0]  # tech shock to x_t
+B[:, 1] = [0.0, 0.0, 1.0, 0.0]  # monetary shock to i_t
+
+# Shock parameters
+shock_std = [0.01, 0.01]
+shock_persistence = [0.9, 0.5]
+
+# Define a function to check BK condition
+def check_blanchard_kahn(phi_pi, phi_y, verbose=False):
+    A = A_template.copy()
+    A[2, 0] = phi_y
+    A[2, 1] = phi_pi
+    try:
+        A_sys = np.eye(4)
+        B_sys = A
+        alpha, beta, Q, Zqz = qz(A_sys, B_sys)
+        eigvals = np.nan_to_num(alpha / beta, nan=np.inf)
+        unstable = (np.abs(eigvals) > 1 + 1e-6).sum()
+        if verbose:
+            return {
+                "phi_pi": phi_pi,
+                "phi_y": phi_y,
+                "eigvals": eigvals,
+                "unstable_roots": unstable,
+                "bk_passed": unstable == 2
+            }
+        return unstable == 2
+    except Exception as e:
+        return {"error": str(e)}
+
+# Test a few known-good policy points
+test_results = []
+for phi_pi in [1.2, 1.5, 1.8, 2.0]:
+    for phi_y in [0.2, 0.5, 0.8, 1.0]:
+        res = check_blanchard_kahn(phi_pi, phi_y, verbose=True)
+        test_results.append(res)
+
+test_results
