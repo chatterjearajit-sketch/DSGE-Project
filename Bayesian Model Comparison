@@ -1,0 +1,583 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import norm, invgamma, beta
+from scipy.optimize import minimize
+from scipy.linalg import solve_discrete_lyapunov, inv
+import pandas as pd
+from typing import Dict, List, Tuple, Optional
+import warnings
+warnings.filterwarnings('ignore')
+
+class DSGEModelWithCostPush:
+    """DSGE Model with cost-push shocks (M1)"""
+    
+    def __init__(self, params: Dict[str, float]):
+        self.params = params
+        self.n_vars = 5  # [x_hat, pi, i, a_hat, u]
+        self.n_shocks = 2  # [eps_a, eps_u]
+        self.n_params = 7  # [sigma, beta, kappa, phi_pi, phi_x, rho_a, rho_u]
+        
+    def solve_model(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Solve the model and return transition and impact matrices"""
+        sigma = self.params['sigma']
+        beta = self.params['beta']
+        kappa = self.params['kappa']
+        phi_pi = self.params['phi_pi']
+        phi_x = self.params['phi_x']
+        rho_a = self.params['rho_a']
+        rho_u = self.params['rho_u']
+        
+        # Solve the system
+        denom = 1 + kappa * phi_x / sigma + kappa * phi_pi / sigma
+        
+        A = np.zeros((5, 5))
+        # Output gap coefficients
+        A[0, 0] = (1 + kappa * phi_x / sigma) / denom
+        A[0, 1] = kappa * phi_pi / (sigma * denom)
+        A[0, 3] = rho_a / (sigma * denom)
+        A[0, 4] = -1 / (sigma * denom)
+        
+        # Inflation coefficients
+        A[1, 0] = kappa * (1 + kappa * phi_x / sigma) / denom
+        A[1, 1] = kappa**2 * phi_pi / (sigma * denom)
+        A[1, 3] = kappa * rho_a / (sigma * denom)
+        A[1, 4] = (1 - kappa / (sigma * denom))
+        
+        # Interest rate (Taylor rule)
+        A[2, 0] = phi_x * A[0, 0] + phi_pi * A[1, 0]
+        A[2, 1] = phi_x * A[0, 1] + phi_pi * A[1, 1]
+        A[2, 3] = phi_x * A[0, 3] + phi_pi * A[1, 3]
+        A[2, 4] = phi_x * A[0, 4] + phi_pi * A[1, 4]
+        
+        # AR processes
+        A[3, 3] = rho_a
+        A[4, 4] = rho_u
+        
+        # Impact matrix
+        B = np.zeros((5, 2))
+        B[0, 0] = rho_a / (sigma * denom)
+        B[1, 0] = kappa * rho_a / (sigma * denom)
+        B[2, 0] = phi_x * B[0, 0] + phi_pi * B[1, 0]
+        B[3, 0] = 1
+        
+        B[0, 1] = -1 / (sigma * denom)
+        B[1, 1] = 1 - kappa / (sigma * denom)
+        B[2, 1] = phi_x * B[0, 1] + phi_pi * B[1, 1]
+        B[4, 1] = 1
+        
+        return A, B
+    
+    def get_state_space_matrices(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Get state space representation: Y_t = C * X_t + v_t"""
+        A, B = self.solve_model()
+        
+        # Observation equation: observe [x_hat, pi, i]
+        C = np.array([[1, 0, 0, 0, 0],
+                      [0, 1, 0, 0, 0],
+                      [0, 0, 1, 0, 0]])
+        
+        # Covariance matrix of shocks
+        Q = np.eye(2)  # Unit variance shocks
+        
+        return A, B, C, Q
+
+class DSGEModelWithoutCostPush:
+    """DSGE Model without cost-push shocks (M2)"""
+    
+    def __init__(self, params: Dict[str, float]):
+        self.params = params
+        self.n_vars = 4  # [x_hat, pi, i, a_hat]
+        self.n_shocks = 1  # [eps_a]
+        self.n_params = 6  # [sigma, beta, kappa, phi_pi, phi_x, rho_a]
+        
+    def solve_model(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Solve the model without cost-push shocks"""
+        sigma = self.params['sigma']
+        beta = self.params['beta']
+        kappa = self.params['kappa']
+        phi_pi = self.params['phi_pi']
+        phi_x = self.params['phi_x']
+        rho_a = self.params['rho_a']
+        
+        # Simplified system without cost-push
+        denom = 1 + kappa * phi_x / sigma + kappa * phi_pi / sigma
+        
+        A = np.zeros((4, 4))
+        # Output gap coefficients
+        A[0, 0] = (1 + kappa * phi_x / sigma) / denom
+        A[0, 1] = kappa * phi_pi / (sigma * denom)
+        A[0, 3] = rho_a / (sigma * denom)
+        
+        # Inflation coefficients
+        A[1, 0] = kappa * (1 + kappa * phi_x / sigma) / denom
+        A[1, 1] = kappa**2 * phi_pi / (sigma * denom)
+        A[1, 3] = kappa * rho_a / (sigma * denom)
+        
+        # Interest rate (Taylor rule)
+        A[2, 0] = phi_x * A[0, 0] + phi_pi * A[1, 0]
+        A[2, 1] = phi_x * A[0, 1] + phi_pi * A[1, 1]
+        A[2, 3] = phi_x * A[0, 3] + phi_pi * A[1, 3]
+        
+        # Technology shock AR
+        A[3, 3] = rho_a
+        
+        # Impact matrix (only technology shock)
+        B = np.zeros((4, 1))
+        B[0, 0] = rho_a / (sigma * denom)
+        B[1, 0] = kappa * rho_a / (sigma * denom)
+        B[2, 0] = phi_x * B[0, 0] + phi_pi * B[1, 0]
+        B[3, 0] = 1
+        
+        return A, B
+    
+    def get_state_space_matrices(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Get state space representation"""
+        A, B = self.solve_model()
+        
+        # Observation equation: observe [x_hat, pi, i]
+        C = np.array([[1, 0, 0, 0],
+                      [0, 1, 0, 0],
+                      [0, 0, 1, 0]])
+        
+        # Covariance matrix of shocks
+        Q = np.eye(1)  # Unit variance shock
+        
+        return A, B, C, Q
+
+def kalman_filter(Y: np.ndarray, A: np.ndarray, B: np.ndarray, C: np.ndarray, 
+                 Q: np.ndarray, R: np.ndarray) -> Tuple[float, np.ndarray, np.ndarray]:
+    """
+    Kalman filter for computing likelihood
+    
+    Parameters:
+    -----------
+    Y : observations (n_obs x T)
+    A : transition matrix
+    B : impact matrix
+    C : observation matrix
+    Q : shock covariance matrix
+    R : observation noise covariance matrix
+    
+    Returns:
+    --------
+    log_likelihood : float
+    filtered_states : np.ndarray
+    prediction_errors : np.ndarray
+    """
+    T = Y.shape[1]  # Time periods
+    n_states = A.shape[0]
+    n_obs = C.shape[0]
+    
+    # Initialize
+    x_pred = np.zeros((n_states, T))
+    x_filt = np.zeros((n_states, T))
+    P_pred = np.zeros((n_states, n_states, T))
+    P_filt = np.zeros((n_states, n_states, T))
+    
+    # Initial conditions
+    x_pred[:, 0] = np.zeros(n_states)
+    P_pred[:, :, 0] = solve_discrete_lyapunov(A, B @ Q @ B.T)
+    
+    log_likelihood = 0.0
+    prediction_errors = np.zeros((n_obs, T))
+    
+    for t in range(T):
+        # Prediction error
+        y_pred = C @ x_pred[:, t]
+        v_t = Y[:, t] - y_pred
+        prediction_errors[:, t] = v_t
+        
+        # Prediction error covariance
+        F_t = C @ P_pred[:, :, t] @ C.T + R
+        
+        # Kalman gain
+        K_t = P_pred[:, :, t] @ C.T @ inv(F_t)
+        
+        # Update
+        x_filt[:, t] = x_pred[:, t] + K_t @ v_t
+        P_filt[:, :, t] = P_pred[:, :, t] - K_t @ C @ P_pred[:, :, t]
+        
+        # Log likelihood contribution
+        log_likelihood += -0.5 * (np.log(2 * np.pi) * n_obs + 
+                                 np.log(np.linalg.det(F_t)) + 
+                                 v_t.T @ inv(F_t) @ v_t)
+        
+        # Predict next period
+        if t < T - 1:
+            x_pred[:, t+1] = A @ x_filt[:, t]
+            P_pred[:, :, t+1] = A @ P_filt[:, :, t] @ A.T + B @ Q @ B.T
+    
+    return log_likelihood, x_filt, prediction_errors
+
+def log_likelihood_function(params: np.ndarray, Y: np.ndarray, model_type: str,
+                           priors: Dict) -> float:
+    """
+    Compute log likelihood for parameter vector
+    """
+    if model_type == "with_costpush":
+        param_dict = {
+            'sigma': params[0],
+            'beta': params[1],
+            'kappa': params[2],
+            'phi_pi': params[3],
+            'phi_x': params[4],
+            'rho_a': params[5],
+            'rho_u': params[6]
+        }
+        model = DSGEModelWithCostPush(param_dict)
+    else:
+        param_dict = {
+            'sigma': params[0],
+            'beta': params[1],
+            'kappa': params[2],
+            'phi_pi': params[3],
+            'phi_x': params[4],
+            'rho_a': params[5]
+        }
+        model = DSGEModelWithoutCostPush(param_dict)
+    
+    try:
+        A, B, C, Q = model.get_state_space_matrices()
+        
+        # Observation noise (small to avoid singularity)
+        R = np.eye(3) * 0.001
+        
+        # Compute likelihood
+        log_lik, _, _ = kalman_filter(Y, A, B, C, Q, R)
+        
+        # Add prior contributions
+        log_prior = 0.0
+        for param_name, value in param_dict.items():
+            if param_name in priors:
+                prior_info = priors[param_name]
+                if prior_info['type'] == 'normal':
+                    log_prior += norm.logpdf(value, prior_info['mean'], prior_info['std'])
+                elif prior_info['type'] == 'beta':
+                    log_prior += beta.logpdf(value, prior_info['alpha'], prior_info['beta'])
+                elif prior_info['type'] == 'invgamma':
+                    log_prior += invgamma.logpdf(value, prior_info['alpha'], scale=prior_info['beta'])
+        
+        return log_lik + log_prior
+        
+    except:
+        return -np.inf
+
+def laplace_approximation(Y: np.ndarray, model_type: str, priors: Dict) -> Tuple[float, np.ndarray, np.ndarray]:
+    """
+    Laplace approximation for marginal likelihood
+    """
+    # Initial parameter values
+    if model_type == "with_costpush":
+        x0 = np.array([2.0, 0.99, 0.1, 1.5, 0.5, 0.9, 0.5])
+        bounds = [(0.1, 10), (0.9, 0.999), (0.01, 1), (1.01, 3), (0.01, 2), (0.1, 0.99), (0.1, 0.99)]
+    else:
+        x0 = np.array([2.0, 0.99, 0.1, 1.5, 0.5, 0.9])
+        bounds = [(0.1, 10), (0.9, 0.999), (0.01, 1), (1.01, 3), (0.01, 2), (0.1, 0.99)]
+    
+    # Find mode (MAP estimate)
+    result = minimize(lambda x: -log_likelihood_function(x, Y, model_type, priors),
+                     x0, bounds=bounds, method='L-BFGS-B')
+    
+    if not result.success:
+        print(f"Warning: Optimization failed for {model_type}")
+        return -np.inf, result.x, np.eye(len(x0))
+    
+    theta_mode = result.x
+    log_posterior_mode = -result.fun
+    
+    # Compute Hessian at mode (numerical approximation)
+    def neg_log_posterior(theta):
+        return -log_likelihood_function(theta, Y, model_type, priors)
+    
+    # Numerical Hessian
+    epsilon = 1e-6
+    n_params = len(theta_mode)
+    hessian = np.zeros((n_params, n_params))
+    
+    for i in range(n_params):
+        for j in range(n_params):
+            if i == j:
+                # Diagonal elements
+                theta_plus = theta_mode.copy()
+                theta_minus = theta_mode.copy()
+                theta_plus[i] += epsilon
+                theta_minus[i] -= epsilon
+                hessian[i, j] = (neg_log_posterior(theta_plus) - 
+                               2 * neg_log_posterior(theta_mode) + 
+                               neg_log_posterior(theta_minus)) / (epsilon**2)
+            else:
+                # Off-diagonal elements
+                theta_pp = theta_mode.copy()
+                theta_pm = theta_mode.copy()
+                theta_mp = theta_mode.copy()
+                theta_mm = theta_mode.copy()
+                
+                theta_pp[i] += epsilon; theta_pp[j] += epsilon
+                theta_pm[i] += epsilon; theta_pm[j] -= epsilon
+                theta_mp[i] -= epsilon; theta_mp[j] += epsilon
+                theta_mm[i] -= epsilon; theta_mm[j] -= epsilon
+                
+                hessian[i, j] = (neg_log_posterior(theta_pp) - 
+                               neg_log_posterior(theta_pm) - 
+                               neg_log_posterior(theta_mp) + 
+                               neg_log_posterior(theta_mm)) / (4 * epsilon**2)
+    
+    # Ensure Hessian is positive definite
+    try:
+        eigenvals = np.linalg.eigvals(hessian)
+        if np.any(eigenvals <= 0):
+            hessian += np.eye(n_params) * (1e-6 - np.min(eigenvals))
+        
+        # Laplace approximation
+        log_marginal_likelihood = (log_posterior_mode + 
+                                 0.5 * n_params * np.log(2 * np.pi) - 
+                                 0.5 * np.log(np.linalg.det(hessian)))
+        
+        return log_marginal_likelihood, theta_mode, hessian
+        
+    except:
+        return -np.inf, theta_mode, np.eye(n_params)
+
+def harmonic_mean_estimator(Y: np.ndarray, model_type: str, priors: Dict, 
+                          n_samples: int = 10000) -> float:
+    """
+    Harmonic mean estimator for marginal likelihood (less stable but included for comparison)
+    """
+    # Generate samples from posterior (simplified MCMC)
+    if model_type == "with_costpush":
+        n_params = 7
+        bounds = [(0.1, 10), (0.9, 0.999), (0.01, 1), (1.01, 3), (0.01, 2), (0.1, 0.99), (0.1, 0.99)]
+    else:
+        n_params = 6
+        bounds = [(0.1, 10), (0.9, 0.999), (0.01, 1), (1.01, 3), (0.01, 2), (0.1, 0.99)]
+    
+    # Simple random walk Metropolis-Hastings
+    samples = []
+    current_params = np.array([np.mean([b[0], b[1]]) for b in bounds])
+    current_loglik = log_likelihood_function(current_params, Y, model_type, priors)
+    
+    n_accepted = 0
+    proposal_cov = np.eye(n_params) * 0.01
+    
+    for i in range(n_samples):
+        # Propose new parameters
+        proposal = np.random.multivariate_normal(current_params, proposal_cov)
+        
+        # Check bounds
+        if all(bounds[j][0] <= proposal[j] <= bounds[j][1] for j in range(n_params)):
+            proposal_loglik = log_likelihood_function(proposal, Y, model_type, priors)
+            
+            # Accept/reject
+            if np.log(np.random.random()) < proposal_loglik - current_loglik:
+                current_params = proposal
+                current_loglik = proposal_loglik
+                n_accepted += 1
+        
+        if i % 1000 == 0 and i > 0:
+            # Adapt proposal covariance
+            if n_accepted / i > 0.5:
+                proposal_cov *= 1.1
+            elif n_accepted / i < 0.2:
+                proposal_cov *= 0.9
+        
+        samples.append(current_params.copy())
+    
+    print(f"Acceptance rate: {n_accepted / n_samples:.3f}")
+    
+    # Compute harmonic mean
+    log_likelihoods = []
+    for sample in samples[-5000:]:  # Use last 5000 samples
+        log_lik = log_likelihood_function(sample, Y, model_type, priors) - sum(
+            [priors[param]['log_prior'](sample[i]) for i, param in enumerate(priors.keys()) if 'log_prior' in priors[param]]
+        )
+        log_likelihoods.append(log_lik)
+    
+    # Harmonic mean (with numerical stability)
+    log_likelihoods = np.array(log_likelihoods)
+    max_log_lik = np.max(log_likelihoods)
+    
+    harmonic_mean = -max_log_lik - np.log(np.mean(np.exp(-(log_likelihoods - max_log_lik))))
+    
+    return harmonic_mean
+
+def generate_synthetic_data(T: int = 100, model_type: str = "with_costpush") -> np.ndarray:
+    """Generate synthetic data for testing"""
+    np.random.seed(42)
+    
+    true_params = {
+        'sigma': 2.0,
+        'beta': 0.99,
+        'kappa': 0.1,
+        'phi_pi': 1.5,
+        'phi_x': 0.5,
+        'rho_a': 0.9,
+        'rho_u': 0.7
+    }
+    
+    if model_type == "with_costpush":
+        model = DSGEModelWithCostPush(true_params)
+    else:
+        model = DSGEModelWithoutCostPush(true_params)
+    
+    A, B, C, Q = model.get_state_space_matrices()
+    
+    # Simulate data
+    n_states = A.shape[0]
+    n_obs = C.shape[0]
+    n_shocks = B.shape[1]
+    
+    X = np.zeros((n_states, T))
+    Y = np.zeros((n_obs, T))
+    
+    for t in range(T):
+        if t > 0:
+            X[:, t] = A @ X[:, t-1] + B @ np.random.multivariate_normal(np.zeros(n_shocks), Q)
+        else:
+            X[:, t] = B @ np.random.multivariate_normal(np.zeros(n_shocks), Q)
+        
+        Y[:, t] = C @ X[:, t] + np.random.multivariate_normal(np.zeros(n_obs), np.eye(n_obs) * 0.001)
+    
+    return Y
+
+def bayesian_model_comparison(Y: np.ndarray):
+    """
+    Compare models with and without cost-push shocks
+    """
+    # Define priors
+    priors = {
+        'sigma': {'type': 'normal', 'mean': 2.0, 'std': 0.5},
+        'beta': {'type': 'beta', 'alpha': 50, 'beta': 2},
+        'kappa': {'type': 'normal', 'mean': 0.1, 'std': 0.05},
+        'phi_pi': {'type': 'normal', 'mean': 1.5, 'std': 0.3},
+        'phi_x': {'type': 'normal', 'mean': 0.5, 'std': 0.2},
+        'rho_a': {'type': 'beta', 'alpha': 8, 'beta': 2},
+        'rho_u': {'type': 'beta', 'alpha': 5, 'beta': 5}
+    }
+    
+    print("Bayesian Model Comparison: Cost-Push Shocks")
+    print("=" * 50)
+    
+    # Model 1: With cost-push shocks
+    print("\nEstimating Model 1: With cost-push shocks...")
+    log_ml_1, theta_1, hess_1 = laplace_approximation(Y, "with_costpush", priors)
+    
+    # Model 2: Without cost-push shocks
+    print("Estimating Model 2: Without cost-push shocks...")
+    priors_m2 = {k: v for k, v in priors.items() if k != 'rho_u'}
+    log_ml_2, theta_2, hess_2 = laplace_approximation(Y, "without_costpush", priors_m2)
+    
+    # Compute Bayes Factor
+    bayes_factor = np.exp(log_ml_1 - log_ml_2)
+    log_bayes_factor = log_ml_1 - log_ml_2
+    
+    # Results
+    print(f"\nResults:")
+    print(f"Log Marginal Likelihood (M1): {log_ml_1:.3f}")
+    print(f"Log Marginal Likelihood (M2): {log_ml_2:.3f}")
+    print(f"Log Bayes Factor (M1 vs M2): {log_bayes_factor:.3f}")
+    print(f"Bayes Factor (M1 vs M2): {bayes_factor:.3f}")
+    
+    # Interpretation
+    print(f"\nInterpretation:")
+    if log_bayes_factor > 3:
+        print("Strong evidence for model with cost-push shocks")
+    elif log_bayes_factor > 1:
+        print("Moderate evidence for model with cost-push shocks")
+    elif log_bayes_factor > -1:
+        print("Weak evidence either way")
+    elif log_bayes_factor > -3:
+        print("Moderate evidence against cost-push shocks")
+    else:
+        print("Strong evidence against cost-push shocks")
+    
+    # Parameter estimates
+    print(f"\nParameter Estimates:")
+    print(f"Model 1 (with cost-push):")
+    param_names_1 = ['sigma', 'beta', 'kappa', 'phi_pi', 'phi_x', 'rho_a', 'rho_u']
+    for i, name in enumerate(param_names_1):
+        print(f"  {name}: {theta_1[i]:.4f}")
+    
+    print(f"Model 2 (without cost-push):")
+    param_names_2 = ['sigma', 'beta', 'kappa', 'phi_pi', 'phi_x', 'rho_a']
+    for i, name in enumerate(param_names_2):
+        print(f"  {name}: {theta_2[i]:.4f}")
+    
+    return {
+        'log_ml_1': log_ml_1,
+        'log_ml_2': log_ml_2,
+        'bayes_factor': bayes_factor,
+        'theta_1': theta_1,
+        'theta_2': theta_2
+    }
+
+def plot_model_comparison_results(results: Dict):
+    """Plot model comparison results"""
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(12, 10))
+    
+    # Marginal likelihoods
+    models = ['With Cost-Push', 'Without Cost-Push']
+    log_mls = [results['log_ml_1'], results['log_ml_2']]
+    
+    ax1.bar(models, log_mls, color=['blue', 'red'], alpha=0.7)
+    ax1.set_ylabel('Log Marginal Likelihood')
+    ax1.set_title('Model Comparison: Log Marginal Likelihoods')
+    ax1.grid(True, alpha=0.3)
+    
+    # Bayes Factor visualization
+    bf = results['bayes_factor']
+    ax2.barh(['BF(M1/M2)'], [bf], color='green' if bf > 1 else 'red', alpha=0.7)
+    ax2.set_xlabel('Bayes Factor')
+    ax2.set_title('Bayes Factor (M1 vs M2)')
+    ax2.axvline(x=1, color='black', linestyle='--', alpha=0.5)
+    ax2.set_xscale('log')
+    ax2.grid(True, alpha=0.3)
+    
+    # Parameter comparison (common parameters)
+    param_names = ['sigma', 'beta', 'kappa', 'phi_pi', 'phi_x', 'rho_a']
+    theta_1_common = results['theta_1'][:6]
+    theta_2_common = results['theta_2'][:6]
+    
+    x = np.arange(len(param_names))
+    width = 0.35
+    
+    ax3.bar(x - width/2, theta_1_common, width, label='With Cost-Push', alpha=0.7)
+    ax3.bar(x + width/2, theta_2_common, width, label='Without Cost-Push', alpha=0.7)
+    ax3.set_ylabel('Parameter Value')
+    ax3.set_title('Parameter Estimates Comparison')
+    ax3.set_xticks(x)
+    ax3.set_xticklabels(param_names)
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+    
+    # Cost-push parameter (only for M1)
+    if len(results['theta_1']) > 6:
+        ax4.bar(['rho_u'], [results['theta_1'][6]], color='blue', alpha=0.7)
+        ax4.set_ylabel('Parameter Value')
+        ax4.set_title('Cost-Push Persistence (Model 1 only)')
+        ax4.set_ylim([0, 1])
+        ax4.grid(True, alpha=0.3)
+    else:
+        ax4.text(0.5, 0.5, 'No cost-push\nparameter in M2', 
+                ha='center', va='center', transform=ax4.transAxes)
+        ax4.set_title('Cost-Push Parameter')
+    
+    plt.tight_layout()
+    plt.show()
+
+# Example usage
+if __name__ == "__main__":
+    # Generate synthetic data (with cost-push shocks)
+    print("Generating synthetic data...")
+    Y = generate_synthetic_data(T=100, model_type="with_costpush")
+    
+    # Perform model comparison
+    results = bayesian_model_comparison(Y)
+    
+    # Plot results
+    plot_model_comparison_results(results)
+    
+    # Additional analysis
+    print(f"\nAdditional Analysis:")
+    print(f"Data dimensions: {Y.shape}")
+    print(f"Sample period: {Y.shape[1]} observations")
+    print(f"Variables: Output gap, Inflation, Interest rate")
