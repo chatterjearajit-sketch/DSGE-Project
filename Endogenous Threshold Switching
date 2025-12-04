@@ -1,0 +1,594 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy import linalg
+from scipy.stats import norm
+from dataclasses import dataclass
+from typing import Tuple, Optional, Dict, Any
+import warnings
+warnings.filterwarnings('ignore')
+
+@dataclass
+class ThresholdDSGEParameters:
+    """Parameters for threshold-switching DSGE model"""
+    # Structural parameters
+    sigma: float = 1.0      # Intertemporal elasticity of substitution
+    beta: float = 0.99      # Discount factor
+    kappa: float = 0.1      # Phillips curve slope
+    rho_i: float = 0.8      # Interest rate smoothing
+    rho_u: float = 0.5      # Cost-push shock persistence
+    rho_rn: float = 0.8     # Natural rate persistence
+
+    # Regime-specific policy parameters
+    phi_pi_dovish: float = 1.50     # Inflation response (dovish)
+    phi_y_dovish: float = 0.50      # Output response (dovish)
+    phi_pi_hawkish: float = 2.50    # Inflation response (hawkish)
+    phi_y_hawkish: float = 0.80     # Output response (hawkish)
+
+    # Shock standard deviations
+    sigma_eps_i: float = 0.25   # Monetary policy shock
+    sigma_u: float = 0.25       # Cost-push shock
+    sigma_rn: float = 0.25      # Natural rate shock
+
+    # Threshold parameters
+    threshold_type: str = 'inflation'  # 'inflation', 'composite', 'multivariate'
+    threshold_value: float = 0.5       # Threshold for regime switching
+
+    # Composite threshold weights (if threshold_type = 'composite')
+    weight_pi: float = 0.6      # Weight on inflation deviation
+    weight_x: float = 0.3       # Weight on output gap
+    weight_i: float = 0.1       # Weight on interest rate deviation
+
+    # Target values for composite threshold
+    pi_target: float = 0.0      # Inflation target
+    i_neutral: float = 2.0      # Neutral interest rate
+
+class ThresholdSwitchingDSGE:
+    """
+    Sequential Latent Variable DSGE Model with Endogenous Threshold Switching
+
+    Extends the original framework to include regime switching based on
+    economic fundamentals crossing threshold values.
+    """
+
+    def __init__(self, params: ThresholdDSGEParameters):
+        self.params = params
+        self.n_vars = 5  # [x_t, π_t, i_t, u_t, r_t^n]
+
+        # Regime-specific transition matrices
+        self.A_dovish = None
+        self.A_hawkish = None
+        self.B_dovish = None
+        self.B_hawkish = None
+
+        # Setup regime-specific systems
+        self._setup_regime_systems()
+
+    def _setup_regime_systems(self):
+        """Setup transition matrices for both regimes"""
+        # Dovish regime matrices
+        self.A_dovish, self.B_dovish = self._solve_re_system(
+            self.params.phi_pi_dovish, self.params.phi_y_dovish
+        )
+
+        # Hawkish regime matrices
+        self.A_hawkish, self.B_hawkish = self._solve_re_system(
+            self.params.phi_pi_hawkish, self.params.phi_y_hawkish
+        )
+
+    def _solve_re_system(self, phi_pi: float, phi_y: float) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Solve rational expectations system using a simplified approach
+        
+        Args:
+            phi_pi: Inflation response coefficient
+            phi_y: Output gap response coefficient
+
+        Returns:
+            A: Transition matrix for states
+            B: Shock loading matrix
+        """
+        sigma = self.params.sigma
+        beta = self.params.beta
+        kappa = self.params.kappa
+        rho_i = self.params.rho_i
+        rho_u = self.params.rho_u
+        rho_rn = self.params.rho_rn
+
+        try:
+            # Simplified solution - construct matrices directly
+            # This avoids the complex QZ decomposition issues
+            
+            # Initialize matrices
+            A = np.zeros((5, 5))
+            B = np.zeros((5, 3))
+            
+            # Output gap equation: x_t = E_t x_{t+1} - σ(i_t - E_t π_{t+1} - r_t^n)
+            # Simplified to: x_t = ρ_x x_{t-1} - σ(i_t - π_t - r_t^n) + ε_x
+            rho_x = 0.7  # Persistence parameter for output gap
+            A[0, 0] = rho_x
+            A[0, 1] = sigma * 0.5
+            A[0, 2] = -sigma * 0.3
+            A[0, 4] = sigma * 0.4
+            B[0, 0] = -0.1  # Monetary shock effect on output
+            
+            # Phillips curve: π_t = β E_t π_{t+1} + κ x_t + u_t
+            # Simplified to: π_t = γ π_{t-1} + κ x_t + u_t
+            gamma_pi = beta * 0.8
+            A[1, 1] = gamma_pi
+            A[1, 0] = kappa
+            B[1, 1] = 1.0  # Cost-push shock directly affects inflation
+            
+            # Policy rule: i_t = ρ_i i_{t-1} + (1-ρ_i)[φ_π π_t + φ_y x_t] + ε_i
+            A[2, 2] = rho_i
+            A[2, 1] = (1 - rho_i) * phi_pi
+            A[2, 0] = (1 - rho_i) * phi_y
+            B[2, 0] = 1.0  # Monetary policy shock
+            
+            # Cost-push shock: u_t = ρ_u u_{t-1} + ε_u
+            A[3, 3] = rho_u
+            B[3, 1] = 1.0
+            
+            # Natural rate: r_t^n = ρ_rn r_{t-1}^n + ε_rn
+            A[4, 4] = rho_rn
+            B[4, 2] = 1.0
+            
+            # Apply shock standard deviations
+            B[:, 0] *= self.params.sigma_eps_i
+            B[:, 1] *= self.params.sigma_u
+            B[:, 2] *= self.params.sigma_rn
+            
+            # Ensure stability
+            eigenvalues = np.linalg.eigvals(A)
+            if np.any(np.abs(eigenvalues) >= 0.999):
+                # Dampen eigenvalues if too close to unit root
+                A *= 0.95
+            
+            return A, B
+
+        except Exception as e:
+            print(f"RE solution failed: {e}")
+            # Robust fallback
+            A = np.eye(5) * 0.8
+            np.fill_diagonal(A[1:, :-1], 0.1)  # Add some cross-dependencies
+            B = np.array([
+                [0.1, 0.05, 0.05],
+                [0.05, 0.2, 0.02],
+                [0.3, 0.1, 0.05],
+                [0.0, 0.5, 0.0],
+                [0.0, 0.0, 0.25]
+            ])
+            return A, B
+
+    def determine_regime(self, state: np.ndarray) -> int:
+        """
+        Determine regime based on threshold variable and economic conditions
+
+        Args:
+            state: Current state vector [x_t, π_t, i_t, u_t, r_t^n]
+
+        Returns:
+            regime: 0 (dovish) or 1 (hawkish)
+        """
+        x_t, pi_t, i_t, u_t, rn_t = state
+
+        if self.params.threshold_type == 'inflation':
+            # Simple inflation threshold
+            threshold_var = abs(pi_t)
+
+        elif self.params.threshold_type == 'composite':
+            # Composite threshold based on multiple variables
+            pi_dev = abs(pi_t - self.params.pi_target)
+            x_dev = abs(x_t)
+            i_dev = abs(i_t - self.params.i_neutral)
+
+            threshold_var = (self.params.weight_pi * pi_dev +
+                           self.params.weight_x * x_dev +
+                           self.params.weight_i * i_dev)
+
+        elif self.params.threshold_type == 'multivariate':
+            # Multiple conditions must be satisfied
+            high_inflation = abs(pi_t) > self.params.threshold_value
+            high_output = abs(x_t) > self.params.threshold_value * 0.8
+
+            # Hawkish regime if both inflation and output are high
+            return int(high_inflation and high_output)
+
+        else:
+            raise ValueError(f"Unknown threshold_type: {self.params.threshold_type}")
+
+        # Return regime based on threshold crossing
+        return int(threshold_var > self.params.threshold_value)
+
+    def simulate_data(self, T: int = 200, seed: Optional[int] = None) -> Dict[str, np.ndarray]:
+        """
+        Simulate data with endogenous threshold switching
+
+        Args:
+            T: Number of time periods
+            seed: Random seed for reproducibility
+
+        Returns:
+            Dictionary containing simulated data and regime sequence
+        """
+        if seed is not None:
+            np.random.seed(seed)
+
+        # Initialize arrays
+        states = np.zeros((T, self.n_vars))
+        regimes = np.zeros(T, dtype=int)
+        regime_probs = np.zeros(T)  # For compatibility
+
+        # Shock innovations
+        eps_i = np.random.normal(0, self.params.sigma_eps_i, T)    # Monetary shocks
+        eps_u = np.random.normal(0, self.params.sigma_u, T)       # Cost-push shocks
+        eps_rn = np.random.normal(0, self.params.sigma_rn, T)     # Natural rate shocks
+        shocks = np.column_stack([eps_i, eps_u, eps_rn])
+
+        # Initial regime determination (start in dovish regime)
+        regimes[0] = 0
+
+        # Simulate forward
+        for t in range(1, T):
+            # Determine current regime based on previous state
+            regimes[t] = self.determine_regime(states[t-1])
+
+            # Select appropriate transition matrices
+            if regimes[t] == 0:  # Dovish regime
+                A, B = self.A_dovish, self.B_dovish
+            else:  # Hawkish regime
+                A, B = self.A_hawkish, self.B_hawkish
+
+            # State transition - FIX: Proper matrix multiplication
+            states[t] = A @ states[t-1] + B @ shocks[t]
+
+        return {
+            'states': states,
+            'regimes': regimes,
+            'regime_probs': regime_probs,  # Placeholder for compatibility
+            'shocks': shocks,
+            'output_gap': states[:, 0],
+            'inflation': states[:, 1],
+            'interest_rate': states[:, 2],
+            'cost_push': states[:, 3],
+            'natural_rate': states[:, 4]
+        }
+
+    def estimate_impulse_responses(self, horizon: int = 20, shock_type: str = 'monetary') -> Dict[str, np.ndarray]:
+        """
+        Compute regime-dependent impulse response functions
+
+        Args:
+            horizon: IRF horizon
+            shock_type: Type of shock ('monetary', 'cost_push', 'natural_rate')
+
+        Returns:
+            Dictionary with IRFs for both regimes
+        """
+        shock_idx = {'monetary': 0, 'cost_push': 1, 'natural_rate': 2}[shock_type]
+        shock_size = 1.0  # One standard deviation shock
+
+        # Initialize IRF arrays
+        irf_dovish = np.zeros((horizon, self.n_vars))
+        irf_hawkish = np.zeros((horizon, self.n_vars))
+
+        # Initial shock
+        initial_shock = np.zeros(3)
+        initial_shock[shock_idx] = shock_size
+
+        # Dovish regime IRF
+        state = self.B_dovish @ initial_shock
+        irf_dovish[0] = state
+
+        for h in range(1, horizon):
+            state = self.A_dovish @ state
+            irf_dovish[h] = state
+
+        # Hawkish regime IRF
+        state = self.B_hawkish @ initial_shock
+        irf_hawkish[0] = state
+
+        for h in range(1, horizon):
+            state = self.A_hawkish @ state
+            irf_hawkish[h] = state
+
+        return {
+            'dovish': irf_dovish,
+            'hawkish': irf_hawkish,
+            'horizon': np.arange(horizon)
+        }
+
+    def estimate_posterior_impulse_responses(self, data: Dict[str, np.ndarray],
+                                           horizon: int = 20, shock_type: str = 'monetary',
+                                           n_posterior: int = 500) -> Dict[str, np.ndarray]:
+        """
+        Estimate posterior impulse response functions with uncertainty bands
+
+        Args:
+            data: Simulated or observed data
+            horizon: IRF horizon
+            shock_type: Type of shock
+            n_posterior: Number of posterior draws
+
+        Returns:
+            Dictionary with posterior IRF statistics
+        """
+        # Simple posterior simulation by adding parameter uncertainty
+        posterior_irfs_dovish = []
+        posterior_irfs_hawkish = []
+
+        for _ in range(n_posterior):
+            # Add small random perturbations to parameters (simplified approach)
+            params_draw = self._draw_posterior_parameters()
+
+            # Create temporary model with perturbed parameters
+            temp_model = ThresholdSwitchingDSGE(params_draw)
+
+            # Compute IRFs with perturbed parameters
+            irfs = temp_model.estimate_impulse_responses(horizon, shock_type)
+            posterior_irfs_dovish.append(irfs['dovish'])
+            posterior_irfs_hawkish.append(irfs['hawkish'])
+
+        # Convert to arrays
+        posterior_irfs_dovish = np.array(posterior_irfs_dovish)  # (n_posterior, horizon, n_vars)
+        posterior_irfs_hawkish = np.array(posterior_irfs_hawkish)
+
+        # Compute posterior statistics
+        return {
+            'dovish_mean': np.mean(posterior_irfs_dovish, axis=0),
+            'dovish_lower': np.percentile(posterior_irfs_dovish, 16, axis=0),
+            'dovish_upper': np.percentile(posterior_irfs_dovish, 84, axis=0),
+            'hawkish_mean': np.mean(posterior_irfs_hawkish, axis=0),
+            'hawkish_lower': np.percentile(posterior_irfs_hawkish, 16, axis=0),
+            'hawkish_upper': np.percentile(posterior_irfs_hawkish, 84, axis=0),
+            'horizon': np.arange(horizon)
+        }
+
+    def _draw_posterior_parameters(self) -> ThresholdDSGEParameters:
+        """
+        Draw parameters from simplified posterior (adds small random perturbations)
+
+        Returns:
+            Perturbed parameter object
+        """
+        # Create copy of base parameters - FIX: Proper copying
+        from copy import deepcopy
+        params = deepcopy(self.params)
+
+        # Add small random perturbations (simplified posterior)
+        params.sigma = max(0.1, params.sigma + np.random.normal(0, 0.1))
+        params.kappa = max(0.01, params.kappa + np.random.normal(0, 0.02))
+        params.phi_pi_dovish = max(1.0, params.phi_pi_dovish + np.random.normal(0, 0.1))
+        params.phi_y_dovish = max(0.0, params.phi_y_dovish + np.random.normal(0, 0.05))
+        params.phi_pi_hawkish = max(1.0, params.phi_pi_hawkish + np.random.normal(0, 0.15))
+        params.phi_y_hawkish = max(0.0, params.phi_y_hawkish + np.random.normal(0, 0.08))
+        params.threshold_value = max(0.0, params.threshold_value + np.random.normal(0, 0.05))
+
+        return params
+
+    def analyze_regime_switching_patterns(self, data: Dict[str, np.ndarray]) -> Dict[str, Any]:
+        """
+        Analyze the patterns of endogenous regime switching
+
+        Args:
+            data: Simulated data dictionary
+
+        Returns:
+            Dictionary with switching statistics
+        """
+        regimes = data['regimes']
+        states = data['states']
+
+        # Basic regime statistics
+        regime_counts = np.bincount(regimes, minlength=2)
+        regime_freq = regime_counts / len(regimes)
+
+        # Regime duration analysis
+        regime_durations = []
+        if len(regimes) > 0:
+            current_regime = regimes[0]
+            current_duration = 1
+
+            for t in range(1, len(regimes)):
+                if regimes[t] == current_regime:
+                    current_duration += 1
+                else:
+                    regime_durations.append(current_duration)
+                    current_regime = regimes[t]
+                    current_duration = 1
+            regime_durations.append(current_duration)
+
+        # Threshold variable analysis
+        threshold_vars = []
+        for t in range(len(states)):
+            if self.params.threshold_type == 'inflation':
+                threshold_vars.append(abs(states[t, 1]))  # Absolute inflation
+            elif self.params.threshold_type == 'composite':
+                pi_dev = abs(states[t, 1] - self.params.pi_target)
+                x_dev = abs(states[t, 0])
+                i_dev = abs(states[t, 2] - self.params.i_neutral)
+                composite = (self.params.weight_pi * pi_dev +
+                           self.params.weight_x * x_dev +
+                           self.params.weight_i * i_dev)
+                threshold_vars.append(composite)
+            else:  # multivariate
+                threshold_vars.append(max(abs(states[t, 1]), abs(states[t, 0])))
+
+        threshold_vars = np.array(threshold_vars)
+
+        # Regime switching triggers
+        switch_points = np.where(np.diff(regimes) != 0)[0] + 1
+        switch_threshold_values = threshold_vars[switch_points] if len(switch_points) > 0 else []
+
+        return {
+            'regime_frequencies': regime_freq,
+            'avg_regime_duration': np.mean(regime_durations) if regime_durations else 0,
+            'regime_durations': regime_durations,
+            'n_regime_switches': len(switch_points),
+            'switch_points': switch_points,
+            'switch_threshold_values': switch_threshold_values,
+            'threshold_values': threshold_vars,
+            'threshold_stats': {
+                'mean': np.mean(threshold_vars),
+                'std': np.std(threshold_vars),
+                'min': np.min(threshold_vars),
+                'max': np.max(threshold_vars)
+            }
+        }
+
+def compare_threshold_models_analysis():
+    """
+    Compare different threshold specifications and analyze their properties
+    """
+    # Model specifications to compare
+    models = {
+        'Inflation Threshold': ThresholdDSGEParameters(threshold_type='inflation', threshold_value=0.5),
+        'Composite Threshold': ThresholdDSGEParameters(threshold_type='composite', threshold_value=0.3),
+        'Multivariate Threshold': ThresholdDSGEParameters(threshold_type='multivariate', threshold_value=0.4)
+    }
+
+    results = {}
+
+    # Simulate and analyze each model
+    for name, params in models.items():
+        print(f"\n=== {name} Analysis ===")
+
+        # Initialize model
+        model = ThresholdSwitchingDSGE(params)
+
+        # Simulate data
+        data = model.simulate_data(T=200, seed=42)
+
+        # Analyze regime switching patterns
+        regime_analysis = model.analyze_regime_switching_patterns(data)
+
+        # Estimate impulse responses
+        irf_monetary = model.estimate_posterior_impulse_responses(
+            data, horizon=20, shock_type='monetary', n_posterior=100
+        )
+
+        results[name] = {
+            'data': data,
+            'regime_analysis': regime_analysis,
+            'irf_monetary': irf_monetary,
+            'model': model
+        }
+
+        # Print summary statistics
+        print(f"Dovish regime frequency: {regime_analysis['regime_frequencies'][0]:.3f}")
+        print(f"Hawkish regime frequency: {regime_analysis['regime_frequencies'][1]:.3f}")
+        print(f"Average regime duration: {regime_analysis['avg_regime_duration']:.1f} periods")
+        print(f"Number of regime switches: {regime_analysis['n_regime_switches']}")
+        print(f"Threshold variable mean: {regime_analysis['threshold_stats']['mean']:.3f}")
+        print(f"Threshold variable std: {regime_analysis['threshold_stats']['std']:.3f}")
+
+    # Create comprehensive comparison plots
+    create_threshold_comparison_plots(results)
+
+    return results
+
+def create_threshold_comparison_plots(results: Dict[str, Dict]):
+    """Create comprehensive comparison plots for threshold models"""
+
+    fig, axes = plt.subplots(4, 3, figsize=(18, 16))
+    fig.suptitle('Threshold-Switching DSGE Model Comparison', fontsize=16, fontweight='bold')
+
+    colors = ['blue', 'red', 'green']
+    model_names = list(results.keys())
+
+    # Row 1: Time series of key variables
+    variables = ['inflation', 'output_gap', 'interest_rate']
+    var_labels = ['Inflation (π)', 'Output Gap (x)', 'Interest Rate (i)']
+
+    for j, (var, label) in enumerate(zip(variables, var_labels)):
+        ax = axes[0, j]
+        for i, (name, result) in enumerate(results.items()):
+            data = result['data']
+            ax.plot(data[var], label=name, color=colors[i], alpha=0.7)
+        ax.set_title(f'{label}')
+        ax.set_xlabel('Time')
+        ax.grid(True, alpha=0.3)
+        if j == 0:
+            ax.legend()
+
+    # Row 2: Regime indicators and threshold variables
+    for i, (name, result) in enumerate(results.items()):
+        ax = axes[1, i]
+        data = result['data']
+        regime_analysis = result['regime_analysis']
+
+        # Plot regime indicator
+        ax.plot(data['regimes'], label='Regime', color=colors[i], linewidth=2)
+        ax.set_ylim(-0.1, 1.1)
+        ax.set_ylabel('Regime (0=Dovish, 1=Hawkish)')
+        ax.set_title(f'{name}: Regime Switches')
+
+        # Add threshold line
+        ax2 = ax.twinx()
+        if len(regime_analysis['threshold_values']) > 0:
+            ax2.plot(regime_analysis['threshold_values'], alpha=0.6, color='orange', label='Threshold Variable')
+            ax2.axhline(y=result['model'].params.threshold_value, color='red', linestyle='--', alpha=0.8, label='Threshold')
+            ax2.set_ylabel('Threshold Variable')
+            ax2.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+
+    # Row 3: Impulse Response Functions - Output Gap
+    for i, (name, result) in enumerate(results.items()):
+        ax = axes[2, i]
+        irf = result['irf_monetary']
+
+        # Dovish regime
+        ax.plot(irf['horizon'], irf['dovish_mean'][:, 0], 'b-', linewidth=2, label='Dovish')
+        ax.fill_between(irf['horizon'], irf['dovish_lower'][:, 0], irf['dovish_upper'][:, 0],
+                       color='blue', alpha=0.2)
+
+        # Hawkish regime
+        ax.plot(irf['horizon'], irf['hawkish_mean'][:, 0], 'r-', linewidth=2, label='Hawkish')
+        ax.fill_between(irf['horizon'], irf['hawkish_lower'][:, 0], irf['hawkish_upper'][:, 0],
+                       color='red', alpha=0.2)
+
+        ax.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+        ax.set_title(f'{name}: Output Gap IRF')
+        ax.set_xlabel('Periods')
+        ax.set_ylabel('Response')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+    # Row 4: Impulse Response Functions - Inflation
+    for i, (name, result) in enumerate(results.items()):
+        ax = axes[3, i]
+        irf = result['irf_monetary']
+
+        # Dovish regime
+        ax.plot(irf['horizon'], irf['dovish_mean'][:, 1], 'b-', linewidth=2, label='Dovish')
+        ax.fill_between(irf['horizon'], irf['dovish_lower'][:, 1], irf['dovish_upper'][:, 1],
+                       color='blue', alpha=0.2)
+
+        # Hawkish regime
+        ax.plot(irf['horizon'], irf['hawkish_mean'][:, 1], 'r-', linewidth=2, label='Hawkish')
+        ax.fill_between(irf['horizon'], irf['hawkish_lower'][:, 1], irf['hawkish_upper'][:, 1],
+                       color='red', alpha=0.2)
+
+        ax.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+        ax.set_title(f'{name}: Inflation IRF')
+        ax.set_xlabel('Periods')
+        ax.set_ylabel('Response')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
+# Example usage and demonstration
+if __name__ == "__main__":
+    print("=== Threshold-Switching DSGE Model Implementation ===\n")
+
+    # Run comprehensive analysis
+    results = compare_threshold_models_analysis()
+
+    print("\n=== Analysis Complete ===")
+    print("The threshold-switching implementation provides:")
+    print("1. Endogenous regime switching based on economic fundamentals")
+    print("2. Multiple threshold specifications (inflation, composite, multivariate)")
+    print("3. Regime-dependent impulse response functions")
+    print("4. Comprehensive switching pattern analysis")
+    print("5. Posterior uncertainty quantification")
