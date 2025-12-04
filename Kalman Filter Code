@@ -1,0 +1,561 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.linalg import solve_discrete_lyapunov, inv, cholesky
+import pandas as pd
+from typing import Dict, List, Tuple, Optional, NamedTuple
+import warnings
+warnings.filterwarnings('ignore')
+
+class KalmanFilterResults(NamedTuple):
+    """Container for Kalman Filter results"""
+    log_likelihood: float
+    filtered_states: np.ndarray
+    predicted_states: np.ndarray
+    filtered_covariance: np.ndarray
+    predicted_covariance: np.ndarray
+    prediction_errors: np.ndarray
+    prediction_error_variance: np.ndarray
+    kalman_gain: np.ndarray
+    smoothed_states: Optional[np.ndarray] = None
+    smoothed_covariance: Optional[np.ndarray] = None
+
+class DSGEKalmanFilter:
+    """
+    Kalman Filter implementation for DSGE models
+    Handles both models with and without cost-push shocks
+    """
+    
+    def __init__(self, params: Dict[str, float], include_costpush: bool = True):
+        """
+        Initialize the Kalman Filter for DSGE model
+        
+        Parameters:
+        -----------
+        params : Dict[str, float]
+            Model parameters
+        include_costpush : bool
+            Whether to include cost-push shocks
+        """
+        self.params = params
+        self.include_costpush = include_costpush
+        
+        if include_costpush:
+            self.state_names = ['x_hat', 'pi', 'i', 'a_hat', 'u']
+            self.shock_names = ['eps_a', 'eps_u']
+            self.n_states = 5
+            self.n_shocks = 2
+        else:
+            self.state_names = ['x_hat', 'pi', 'i', 'a_hat']
+            self.shock_names = ['eps_a']
+            self.n_states = 4
+            self.n_shocks = 1
+        
+        self.obs_names = ['x_hat_obs', 'pi_obs', 'i_obs']
+        self.n_obs = 3
+        
+        # Get state-space matrices
+        self.A, self.B, self.C, self.Q, self.R = self._get_state_space_matrices()
+        
+    def _solve_dsge_model(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Solve the DSGE model and return transition and impact matrices"""
+        sigma = self.params['sigma']
+        beta = self.params['beta']
+        kappa = self.params['kappa']
+        phi_pi = self.params['phi_pi']
+        phi_x = self.params['phi_x']
+        rho_a = self.params['rho_a']
+        
+        if self.include_costpush:
+            rho_u = self.params['rho_u']
+            
+            # Solve with cost-push shocks
+            denom = 1 + kappa * phi_x / sigma + kappa * phi_pi / sigma
+            
+            A = np.zeros((5, 5))
+            # Output gap coefficients
+            A[0, 0] = (1 + kappa * phi_x / sigma) / denom
+            A[0, 1] = kappa * phi_pi / (sigma * denom)
+            A[0, 3] = rho_a / (sigma * denom)
+            A[0, 4] = -1 / (sigma * denom)
+            
+            # Inflation coefficients
+            A[1, 0] = kappa * (1 + kappa * phi_x / sigma) / denom
+            A[1, 1] = kappa**2 * phi_pi / (sigma * denom)
+            A[1, 3] = kappa * rho_a / (sigma * denom)
+            A[1, 4] = (1 - kappa / (sigma * denom))
+            
+            # Interest rate (Taylor rule)
+            A[2, 0] = phi_x * A[0, 0] + phi_pi * A[1, 0]
+            A[2, 1] = phi_x * A[0, 1] + phi_pi * A[1, 1]
+            A[2, 3] = phi_x * A[0, 3] + phi_pi * A[1, 3]
+            A[2, 4] = phi_x * A[0, 4] + phi_pi * A[1, 4]
+            
+            # AR processes
+            A[3, 3] = rho_a
+            A[4, 4] = rho_u
+            
+            # Impact matrix
+            B = np.zeros((5, 2))
+            B[0, 0] = rho_a / (sigma * denom)
+            B[1, 0] = kappa * rho_a / (sigma * denom)
+            B[2, 0] = phi_x * B[0, 0] + phi_pi * B[1, 0]
+            B[3, 0] = 1
+            
+            B[0, 1] = -1 / (sigma * denom)
+            B[1, 1] = 1 - kappa / (sigma * denom)
+            B[2, 1] = phi_x * B[0, 1] + phi_pi * B[1, 1]
+            B[4, 1] = 1
+            
+        else:
+            # Solve without cost-push shocks
+            denom = 1 + kappa * phi_x / sigma + kappa * phi_pi / sigma
+            
+            A = np.zeros((4, 4))
+            # Output gap coefficients
+            A[0, 0] = (1 + kappa * phi_x / sigma) / denom
+            A[0, 1] = kappa * phi_pi / (sigma * denom)
+            A[0, 3] = rho_a / (sigma * denom)
+            
+            # Inflation coefficients
+            A[1, 0] = kappa * (1 + kappa * phi_x / sigma) / denom
+            A[1, 1] = kappa**2 * phi_pi / (sigma * denom)
+            A[1, 3] = kappa * rho_a / (sigma * denom)
+            
+            # Interest rate (Taylor rule)
+            A[2, 0] = phi_x * A[0, 0] + phi_pi * A[1, 0]
+            A[2, 1] = phi_x * A[0, 1] + phi_pi * A[1, 1]
+            A[2, 3] = phi_x * A[0, 3] + phi_pi * A[1, 3]
+            
+            # Technology shock AR
+            A[3, 3] = rho_a
+            
+            # Impact matrix (only technology shock)
+            B = np.zeros((4, 1))
+            B[0, 0] = rho_a / (sigma * denom)
+            B[1, 0] = kappa * rho_a / (sigma * denom)
+            B[2, 0] = phi_x * B[0, 0] + phi_pi * B[1, 0]
+            B[3, 0] = 1
+            
+        return A, B
+    
+    def _get_state_space_matrices(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Get all state-space matrices for the Kalman Filter"""
+        
+        # Get model solution
+        A, B = self._solve_dsge_model()
+        
+        # Observation matrix - observe first 3 variables [x_hat, pi, i]
+        if self.include_costpush:
+            C = np.array([[1, 0, 0, 0, 0],  # x_hat
+                         [0, 1, 0, 0, 0],   # pi
+                         [0, 0, 1, 0, 0]])  # i
+        else:
+            C = np.array([[1, 0, 0, 0],     # x_hat
+                         [0, 1, 0, 0],      # pi
+                         [0, 0, 1, 0]])     # i
+        
+        # Shock covariance matrix (assume unit variance shocks)
+        Q = np.eye(self.n_shocks)
+        
+        # Measurement error covariance (small values)
+        R = np.eye(self.n_obs) * 0.001
+        
+        return A, B, C, Q, R
+    
+    def _initialize_filter(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Initialize the Kalman Filter with unconditional mean and covariance"""
+        
+        # Initial state (unconditional mean = 0)
+        x_0 = np.zeros(self.n_states)
+        
+        # Initial covariance (unconditional covariance from stationary distribution)
+        try:
+            P_0 = solve_discrete_lyapunov(self.A, self.B @ self.Q @ self.B.T)
+        except:
+            # Fallback if Lyapunov equation fails
+            P_0 = np.eye(self.n_states) * 10
+        
+        return x_0, P_0
+    
+    def filter(self, Y: np.ndarray, return_all: bool = True) -> KalmanFilterResults:
+        """
+        Run the Kalman Filter on observed data
+        
+        Parameters:
+        -----------
+        Y : np.ndarray
+            Observed data (n_obs x T)
+        return_all : bool
+            Whether to return all intermediate results
+            
+        Returns:
+        --------
+        KalmanFilterResults
+            Complete filter results
+        """
+        T = Y.shape[1]  # Number of time periods
+        
+        # Initialize storage arrays
+        x_pred = np.zeros((self.n_states, T))      # Predicted states
+        x_filt = np.zeros((self.n_states, T))      # Filtered states
+        P_pred = np.zeros((self.n_states, self.n_states, T))  # Predicted covariance
+        P_filt = np.zeros((self.n_states, self.n_states, T))  # Filtered covariance
+        
+        v = np.zeros((self.n_obs, T))              # Prediction errors
+        F = np.zeros((self.n_obs, self.n_obs, T))  # Prediction error covariance
+        K = np.zeros((self.n_states, self.n_obs, T))  # Kalman gain
+        
+        # Initialize
+        x_init, P_init = self._initialize_filter()
+        
+        # Set initial prediction
+        x_pred[:, 0] = x_init
+        P_pred[:, :, 0] = P_init
+        
+        log_likelihood = 0.0
+        
+        print("Running Kalman Filter...")
+        print(f"Time periods: {T}")
+        print(f"State variables: {self.n_states}")
+        print(f"Observed variables: {self.n_obs}")
+        print("-" * 50)
+        
+        for t in range(T):
+            # PREDICTION ERROR (Innovation)
+            y_pred = self.C @ x_pred[:, t]
+            v[:, t] = Y[:, t] - y_pred
+            
+            # PREDICTION ERROR COVARIANCE
+            F[:, :, t] = self.C @ P_pred[:, :, t] @ self.C.T + self.R
+            
+            # Check for numerical issues
+            try:
+                F_inv = inv(F[:, :, t])
+                F_det = np.linalg.det(F[:, :, t])
+                
+                if F_det <= 0:
+                    print(f"Warning: Singular F matrix at time {t}")
+                    F[:, :, t] += np.eye(self.n_obs) * 1e-8
+                    F_inv = inv(F[:, :, t])
+                    F_det = np.linalg.det(F[:, :, t])
+                    
+            except np.linalg.LinAlgError:
+                print(f"Error: Cannot invert F matrix at time {t}")
+                F[:, :, t] += np.eye(self.n_obs) * 1e-6
+                F_inv = inv(F[:, :, t])
+                F_det = np.linalg.det(F[:, :, t])
+            
+            # KALMAN GAIN
+            K[:, :, t] = P_pred[:, :, t] @ self.C.T @ F_inv
+            
+            # UPDATE STEP (Filtering)
+            x_filt[:, t] = x_pred[:, t] + K[:, :, t] @ v[:, t]
+            P_filt[:, :, t] = P_pred[:, :, t] - K[:, :, t] @ self.C @ P_pred[:, :, t]
+            
+            # Ensure P_filt is positive definite
+            eigenvals = np.linalg.eigvals(P_filt[:, :, t])
+            if np.any(eigenvals <= 0):
+                P_filt[:, :, t] += np.eye(self.n_states) * (1e-8 - np.min(eigenvals))
+            
+            # LOG-LIKELIHOOD CONTRIBUTION
+            log_lik_t = (-0.5 * (self.n_obs * np.log(2 * np.pi) + 
+                                np.log(F_det) + 
+                                v[:, t].T @ F_inv @ v[:, t]))
+            log_likelihood += log_lik_t
+            
+            # PREDICTION STEP for next period
+            if t < T - 1:
+                x_pred[:, t+1] = self.A @ x_filt[:, t]
+                P_pred[:, :, t+1] = self.A @ P_filt[:, :, t] @ self.A.T + self.B @ self.Q @ self.B.T
+            
+            # Progress indicator
+            if (t + 1) % 20 == 0 or t == T - 1:
+                print(f"Period {t+1:3d}: Log-likelihood = {log_likelihood:8.3f}")
+        
+        print(f"\nFinal log-likelihood: {log_likelihood:.6f}")
+        
+        if return_all:
+            return KalmanFilterResults(
+                log_likelihood=log_likelihood,
+                filtered_states=x_filt,
+                predicted_states=x_pred,
+                filtered_covariance=P_filt,
+                predicted_covariance=P_pred,
+                prediction_errors=v,
+                prediction_error_variance=F,
+                kalman_gain=K
+            )
+        else:
+            return KalmanFilterResults(
+                log_likelihood=log_likelihood,
+                filtered_states=x_filt,
+                predicted_states=x_pred,
+                filtered_covariance=None,
+                predicted_covariance=None,
+                prediction_errors=v,
+                prediction_error_variance=F,
+                kalman_gain=None
+            )
+    
+    def smooth(self, filter_results: KalmanFilterResults) -> KalmanFilterResults:
+        """
+        Run the Kalman Smoother (Rauch-Tung-Striebel)
+        
+        Parameters:
+        -----------
+        filter_results : KalmanFilterResults
+            Results from the Kalman Filter
+            
+        Returns:
+        --------
+        KalmanFilterResults
+            Filter results with smoothed states and covariances
+        """
+        T = filter_results.filtered_states.shape[1]
+        
+        # Initialize smoothed arrays
+        x_smooth = np.zeros((self.n_states, T))
+        P_smooth = np.zeros((self.n_states, self.n_states, T))
+        
+        # Initialize with filtered values at T
+        x_smooth[:, T-1] = filter_results.filtered_states[:, T-1]
+        P_smooth[:, :, T-1] = filter_results.filtered_covariance[:, :, T-1]
+        
+        print("Running Kalman Smoother...")
+        
+        # Backward recursion
+        for t in range(T-2, -1, -1):
+            # Smoother gain
+            try:
+                J_t = (filter_results.filtered_covariance[:, :, t] @ self.A.T @ 
+                       inv(filter_results.predicted_covariance[:, :, t+1]))
+            except:
+                # Regularize if needed
+                P_pred_reg = filter_results.predicted_covariance[:, :, t+1] + np.eye(self.n_states) * 1e-8
+                J_t = filter_results.filtered_covariance[:, :, t] @ self.A.T @ inv(P_pred_reg)
+            
+            # Smoothed state
+            x_smooth[:, t] = (filter_results.filtered_states[:, t] + 
+                            J_t @ (x_smooth[:, t+1] - filter_results.predicted_states[:, t+1]))
+            
+            # Smoothed covariance
+            P_smooth[:, :, t] = (filter_results.filtered_covariance[:, :, t] + 
+                               J_t @ (P_smooth[:, :, t+1] - filter_results.predicted_covariance[:, :, t+1]) @ J_t.T)
+        
+        print("Smoothing completed.")
+        
+        # Return updated results
+        return filter_results._replace(
+            smoothed_states=x_smooth,
+            smoothed_covariance=P_smooth
+        )
+    
+    def diagnostics(self, filter_results: KalmanFilterResults, Y: np.ndarray):
+        """
+        Run diagnostic tests on filter results
+        """
+        T = Y.shape[1]
+        
+        print("\nKalman Filter Diagnostics")
+        print("=" * 40)
+        
+        # 1. Prediction error statistics
+        v = filter_results.prediction_errors
+        print(f"Prediction Error Statistics:")
+        print(f"  Mean prediction errors: {np.mean(v, axis=1)}")
+        print(f"  Std prediction errors:  {np.std(v, axis=1)}")
+        
+        # 2. Standardized prediction errors
+        standardized_errors = np.zeros_like(v)
+        for t in range(T):
+            F_chol = cholesky(filter_results.prediction_error_variance[:, :, t], lower=True)
+            standardized_errors[:, t] = np.linalg.solve(F_chol, v[:, t])
+        
+        print(f"Standardized Prediction Errors:")
+        print(f"  Mean: {np.mean(standardized_errors, axis=1)}")
+        print(f"  Std:  {np.std(standardized_errors, axis=1)}")
+        
+        # 3. Ljung-Box test for serial correlation (simplified)
+        def ljung_box_stat(residuals, lags=10):
+            n = len(residuals)
+            autocorrs = []
+            for lag in range(1, lags+1):
+                if lag < n:
+                    autocorr = np.corrcoef(residuals[:-lag], residuals[lag:])[0, 1]
+                    autocorrs.append(autocorr if not np.isnan(autocorr) else 0)
+                else:
+                    autocorrs.append(0)
+            
+            lb_stat = n * (n + 2) * sum([(autocorrs[i]**2) / (n - i - 1) for i in range(len(autocorrs))])
+            return lb_stat
+        
+        print(f"Serial Correlation Tests (Ljung-Box):")
+        for i in range(self.n_obs):
+            lb_stat = ljung_box_stat(standardized_errors[i, :])
+            print(f"  Variable {i+1}: {lb_stat:.3f}")
+        
+        # 4. Filter stability
+        max_eigenval = np.max(np.abs(np.linalg.eigvals(self.A)))
+        print(f"Model Stability:")
+        print(f"  Max eigenvalue of A: {max_eigenval:.4f}")
+        print(f"  Stable: {'Yes' if max_eigenval < 1 else 'No'}")
+        
+        return standardized_errors
+
+def plot_kalman_results(kf: DSGEKalmanFilter, results: KalmanFilterResults, Y: np.ndarray):
+    """Plot Kalman Filter results"""
+    T = Y.shape[1]
+    time_axis = np.arange(T)
+    
+    # Create figure
+    if kf.include_costpush:
+        fig, axes = plt.subplots(3, 2, figsize=(15, 12))
+        axes = axes.flatten()
+    else:
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        axes = axes.flatten()
+    
+    # Plot observed vs predicted
+    obs_vars = ['Output Gap', 'Inflation', 'Interest Rate']
+    for i in range(3):
+        ax = axes[i]
+        
+        # Observed data
+        ax.plot(time_axis, Y[i, :], 'bo-', label='Observed', markersize=3)
+        
+        # Predicted (one-step ahead)
+        y_pred = kf.C @ results.predicted_states
+        ax.plot(time_axis, y_pred[i, :], 'r--', label='Predicted', linewidth=2)
+        
+        # Filtered
+        y_filt = kf.C @ results.filtered_states
+        ax.plot(time_axis, y_filt[i, :], 'g-', label='Filtered', linewidth=1.5)
+        
+        # Add confidence bands if smoothed results available
+        if results.smoothed_states is not None:
+            y_smooth = kf.C @ results.smoothed_states
+            ax.plot(time_axis, y_smooth[i, :], 'm-', label='Smoothed', linewidth=1.5)
+        
+        ax.set_title(f'{obs_vars[i]}')
+        ax.set_xlabel('Time')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+    
+    # Plot unobserved states
+    state_idx = 3  # Start from technology shock
+    ax = axes[3]
+    
+    # Technology shock
+    ax.plot(time_axis, results.filtered_states[state_idx, :], 'b-', 
+           label='Technology Shock', linewidth=2)
+    
+    if results.smoothed_states is not None:
+        ax.plot(time_axis, results.smoothed_states[state_idx, :], 'r--', 
+               label='Smoothed', linewidth=1.5)
+    
+    ax.set_title('Technology Shock')
+    ax.set_xlabel('Time')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # Cost-push shock (if included)
+    if kf.include_costpush:
+        ax = axes[4]
+        ax.plot(time_axis, results.filtered_states[4, :], 'b-', 
+               label='Cost-Push Shock', linewidth=2)
+        
+        if results.smoothed_states is not None:
+            ax.plot(time_axis, results.smoothed_states[4, :], 'r--', 
+                   label='Smoothed', linewidth=1.5)
+        
+        ax.set_title('Cost-Push Shock')
+        ax.set_xlabel('Time')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # Prediction errors
+        ax = axes[5]
+    else:
+        ax = axes[4] if len(axes) > 4 else plt.subplot(2, 2, 4)
+    
+    # Plot prediction errors
+    for i in range(3):
+        ax.plot(time_axis, results.prediction_errors[i, :], 
+               label=f'{obs_vars[i]} Error', alpha=0.7)
+    
+    ax.set_title('Prediction Errors')
+    ax.set_xlabel('Time')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.axhline(y=0, color='black', linestyle='--', alpha=0.5)
+    
+    plt.tight_layout()
+    plt.show()
+
+# Example usage and testing
+def generate_synthetic_data(T: int = 100, include_costpush: bool = True) -> Tuple[np.ndarray, Dict[str, float]]:
+    """Generate synthetic data for testing"""
+    np.random.seed(42)
+    
+    true_params = {
+        'sigma': 2.0,
+        'beta': 0.99,
+        'kappa': 0.1,
+        'phi_pi': 1.5,
+        'phi_x': 0.5,
+        'rho_a': 0.9,
+        'rho_u': 0.7
+    }
+    
+    # Initialize Kalman Filter
+    kf = DSGEKalmanFilter(true_params, include_costpush=include_costpush)
+    
+    # Simulate data
+    n_states = kf.n_states
+    n_obs = kf.n_obs
+    n_shocks = kf.n_shocks
+    
+    X = np.zeros((n_states, T))
+    Y = np.zeros((n_obs, T))
+    
+    # Initial state
+    X[:, 0] = np.random.multivariate_normal(np.zeros(n_states), np.eye(n_states) * 0.1)
+    
+    for t in range(T):
+        if t > 0:
+            # State evolution
+            shocks = np.random.multivariate_normal(np.zeros(n_shocks), kf.Q)
+            X[:, t] = kf.A @ X[:, t-1] + kf.B @ shocks
+        
+        # Observations
+        obs_noise = np.random.multivariate_normal(np.zeros(n_obs), kf.R)
+        Y[:, t] = kf.C @ X[:, t] + obs_noise
+    
+    return Y, true_params
+
+if __name__ == "__main__":
+    # Test with synthetic data
+    print("Testing Kalman Filter with synthetic data")
+    print("=" * 50)
+    
+    # Generate data
+    Y, true_params = generate_synthetic_data(T=100, include_costpush=True)
+    
+    # Initialize filter
+    kf = DSGEKalmanFilter(true_params, include_costpush=True)
+    
+    # Run filter
+    results = kf.filter(Y)
+    
+    # Run smoother
+    results = kf.smooth(results)
+    
+    # Run diagnostics
+    standardized_errors = kf.diagnostics(results, Y)
+    
+    # Plot results
+    plot_kalman_results(kf, results, Y)
+    
+    print(f"\nSummary:")
+    print(f"Log-likelihood: {results.log_likelihood:.6f}")
+    print(f"Average prediction error variance: {np.mean(np.diagonal(results.prediction_error_variance, axis1=0, axis2=1)):.6f}")
