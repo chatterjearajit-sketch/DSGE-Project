@@ -1,0 +1,35 @@
+from scipy.linalg import qz
+
+def check_blanchard_kahn_correct(phi_pi, phi_y):
+    # Construct A matrix based on policy
+    A = A_template.copy()
+    A[2, 0] = phi_y
+    A[2, 1] = phi_pi
+
+    # System: y_t = A * y_{t-1} + shock
+    A_sys = np.eye(4)
+    B_sys = A
+
+    # QZ decomposition
+    alpha, beta, Q, Z = qz(A_sys, B_sys)
+    eigvals = np.nan_to_num(alpha / beta, nan=np.inf)  # clean any divide-by-zero
+
+    # Unstable roots (modulus > 1)
+    eigvals_flat = eigvals.flatten()
+    unstable = (np.abs(eigvals_flat) > 1).sum()
+    n_forward = 2  # number of forward-looking variables
+
+    print(f"\n�� BK check for φ_π = {phi_pi:.2f}, φ_y = {phi_y:.2f}")
+    print("Generalized Eigenvalues (α/β):")
+    print(np.round(eigvals_flat, 4))
+    print(f"Unstable roots: {unstable}")
+    
+    if unstable == n_forward:
+        print("✅ Blanchard-Kahn conditions satisfied: Unique and stable equilibrium.")
+    elif unstable < n_forward:
+        print("⚠️ Indeterminacy: Multiple equilibria.")
+    else:
+        print("❌ No stable solution: Too many unstable roots.")
+
+# ✅ Check for your optimal policy
+check_blanchard_kahn_correct(optimal_phi_pi, optimal_phi_y)
