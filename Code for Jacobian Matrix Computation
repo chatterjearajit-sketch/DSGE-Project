@@ -1,0 +1,17 @@
+from sympy import symbols, Function, Matrix, diff, simplify
+
+# Define symbols
+x_t, x_tp1 = symbols('x_t x_tp1')             # output gap today and tomorrow
+pi_tp1 = symbols('pi_tp1')                    # expected inflation tomorrow
+i_t = symbols('i_t')                          # nominal interest rate
+sigma = symbols('sigma', positive=True)       # intertemporal elasticity inverse
+
+# Define IS Curve: x_t = E_t x_{t+1} - (1/sigma)(i_t - E_t pi_{t+1})
+IS_curve = x_tp1 - (1/sigma)*(i_t - pi_tp1) - x_t
+
+# Compute Jacobian of IS Curve w.r.t. [x_tp1, pi_tp1, i_t, x_t] \\
+variables = [x_tp1, pi_tp1, i_t, x_t]
+jacobian_IS = Matrix([diff(IS_curve, var) for var in variables])
+
+jacobian_IS.simplify()
+jacobian_IS
