@@ -1,0 +1,100 @@
+# --- DSGE Policy Loss Surface Plot---
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+from mpl_toolkits.mplot3d import Axes3D
+
+# === Model Parameters ===
+T = 40
+n_sim = 1000
+shock_std = [0.01, 0.01]
+shock_persistence = [0.9, 0.5]
+
+lambda_pi = 1.0     # weight on inflation
+lambda_x = 1.0      # weight on output gap
+lambda_i = 0.1      # weight on interest rate volatility
+
+# === System Matrix Template ===
+A_template = np.array([
+    [0.5, -0.5, -0.5, 0.0],     # x_t
+    [0.05, 0.98, -0.05, 0.0],   # pi_t
+    [0.2, 1.2, 0.0, 0.8],       # i_t (phi_pi, phi_y to be modified)
+    [0.0, 0.0, 1.0, 0.0]        # i_{t-1}
+])
+
+# === Shock Impact Matrix ===
+B = np.zeros((4, 2))
+B[:, 0] = [1.0, 0.0, 0.0, 0.0]  # tech shock
+B[:, 1] = [0.0, 0.0, 1.0, 0.0]  # monetary shock
+
+# === Evaluation Function ===
+def evaluate_policy(phi_pi, phi_y, A_template, B, T, n_sim,
+                    lambda_pi=1.0, lambda_x=1.0, lambda_i=0.1):
+
+    A = A_template.copy()
+    A[2, 0] = phi_y    # output response
+    A[2, 1] = phi_pi   # inflation response
+
+    paths = np.zeros((n_sim, 4, T))  # [x, pi, i, i_{-1}]
+
+    for s in range(n_sim):
+        y = np.zeros((4, T))
+        shocks = np.zeros((2, T))
+
+        for j in range(2):
+            shocks[j, 0] = shock_std[j] * np.random.randn()
+            for t in range(1, T):
+                shocks[j, t] = shock_persistence[j] * shocks[j, t-1] + shock_std[j] * np.random.randn()
+
+        for t in range(1, T):
+            y[:, t] = A @ y[:, t-1] + B @ shocks[:, t]
+
+        paths[s] = y
+
+    x_paths = paths[:, 0, :]
+    pi_paths = paths[:, 1, :]
+    i_paths = paths[:, 2, :]
+
+    # Compute standard deviations (volatility)
+    vol_x = np.mean(np.std(x_paths, axis=1))
+    vol_pi = np.mean(np.std(pi_paths, axis=1))
+    vol_i = np.mean(np.std(i_paths, axis=1))
+
+    # Compute loss function
+    loss = lambda_pi * vol_pi**2 + lambda_x * vol_x**2 + lambda_i * vol_i**2
+
+    return loss
+
+# === Evaluate Grid ===
+def evaluate_loss_grid(phi_pi_grid, phi_y_grid):
+    Z = np.zeros((len(phi_y_grid), len(phi_pi_grid)))
+
+    for i, phi_y in enumerate(phi_y_grid):
+        for j, phi_pi in enumerate(phi_pi_grid):
+            loss = evaluate_policy(
+                phi_pi, phi_y, A_template, B, T, n_sim,
+                lambda_pi, lambda_x, lambda_i
+            )
+            Z[i, j] = loss
+            print(f"φ_pi={phi_pi:.2f}, φ_y={phi_y:.2f} -> Loss: {loss:.5f}")
+
+    return Z
+
+# === Grid Settings ===
+phi_pi_vals = np.linspace(0.5, 2.5, 15)   # inflation response
+phi_y_vals = np.linspace(0.0, 1.5, 15)    # output response
+
+Z = evaluate_loss_grid(phi_pi_vals, phi_y_vals)
+
+# === Plot 3D Surface ===
+X, Y = np.meshgrid(phi_pi_vals, phi_y_vals)
+fig = plt.figure(figsize=(10, 6))
+ax = fig.add_subplot(111, projection='3d')
+surf = ax.plot_surface(X, Y, Z, cmap='viridis', edgecolor='k', alpha=0.9)
+
+ax.set_xlabel(r'$\phi_\pi$ (Response to Inflation)', fontsize=12)
+ax.set_ylabel(r'$\phi_y$ (Response to Output Gap)', fontsize=12)
+ax.set_zlabel('Loss Function', fontsize=12)
+ax.set_title('Central Bank Loss Surface over Taylor Rule Grid', fontsize=14)
+plt.tight_layout()
+plt.show()
