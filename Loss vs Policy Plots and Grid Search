@@ -1,0 +1,71 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# --- Model Parameters ---
+T = 40
+n_sim = 500
+shock_std = [0.01, 0.01]
+shock_persistence = [0.9, 0.5]
+
+lambda_pi = 1.0
+lambda_x = 1.0
+lambda_i = 0.1
+
+# --- Base System Template ---
+A_template = np.array([
+    [0.5, -0.5, -0.5, 0.0],     
+    [0.05, 0.98, -0.05, 0.0],   
+    [0.2, 1.2, 0.0, 0.8],       
+    [0.0, 0.0, 1.0, 0.0]        
+])
+
+B = np.zeros((4, 2))
+B[:, 0] = [1.0, 0.0, 0.0, 0.0]  # technology
+B[:, 1] = [0.0, 0.0, 1.0, 0.0]  # monetary
+
+# --- Loss Function Evaluation ---
+def evaluate_policy(phi_pi, phi_y):
+    A = A_template.copy()
+    A[2, 0] = phi_y
+    A[2, 1] = phi_pi
+
+    paths = np.zeros((n_sim, 4, T))
+    for s in range(n_sim):
+        y = np.zeros((4, T))
+        shocks = np.zeros((2, T))
+        for j in range(2):
+            shocks[j, 0] = shock_std[j] * np.random.randn()
+            for t in range(1, T):
+                shocks[j, t] = shock_persistence[j] * shocks[j, t-1] + shock_std[j] * np.random.randn()
+        for t in range(1, T):
+            y[:, t] = A @ y[:, t-1] + B @ shocks[:, t]
+        paths[s] = y
+
+    x_var = np.mean(np.var(paths[:, 0, :], axis=1))
+    pi_var = np.mean(np.var(paths[:, 1, :], axis=1))
+    i_var = np.mean(np.var(paths[:, 2, :], axis=1))
+
+    return lambda_pi * pi_var + lambda_x * x_var + lambda_i * i_var
+
+# --- Grid Search over φ_π and φ_y ---
+phi_pi_vals = np.linspace(0.5, 2.5, 20)
+phi_y_vals = np.linspace(0.0, 1.5, 20)
+
+Z = np.zeros((len(phi_y_vals), len(phi_pi_vals)))
+
+print("Starting grid search...")
+for i, phi_y in enumerate(phi_y_vals):
+    for j, phi_pi in enumerate(phi_pi_vals):
+        Z[i, j] = evaluate_policy(phi_pi, phi_y)
+        print(f"φ_π={phi_pi:.2f}, φ_y={phi_y:.2f} -> Loss: {Z[i,j]:.5f}")
+
+# --- Heatmap Plot ---
+plt.figure(figsize=(10, 6))
+sns.heatmap(Z, xticklabels=np.round(phi_pi_vals, 2), yticklabels=np.round(phi_y_vals, 2),
+            cmap='viridis', annot=False)
+plt.xlabel(r'$\phi_\pi$ (Inflation Response)')
+plt.ylabel(r'$\phi_y$ (Output Gap Response)')
+plt.title("Central Bank Loss over Taylor Rule Grid")
+plt.tight_layout()
+plt.show()
