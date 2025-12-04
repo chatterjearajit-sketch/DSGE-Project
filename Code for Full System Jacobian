@@ -1,0 +1,27 @@
+# Re-import after state reset
+from sympy import symbols, Matrix, diff
+
+# Declare symbols again
+x_t, x_tp1 = symbols('x_t x_tp1')
+pi_t, pi_tp1 = symbols('pi_t pi_tp1')
+i_t, i_tm1 = symbols('i_t i_tm1')
+u_t, eps_i = symbols('u_t eps_i')
+sigma, beta, kappa, rho, phi_pi, phi_y = symbols('sigma beta kappa rho phi_pi phi_y', positive=True)
+
+# Define equations
+IS_curve = x_tp1 - (1/sigma)*(i_t - pi_tp1) - x_t
+Phillips_curve = beta * pi_tp1 + kappa * x_t + u_t - pi_t
+Taylor_rule = rho * i_tm1 + (1 - rho)*(phi_pi * pi_t + phi_y * x_t) + eps_i - i_t
+
+# Variables in Jacobian
+variables_all = [x_tp1, pi_tp1, x_t, pi_t, i_t, i_tm1, u_t, eps_i]
+
+# Jacobians
+jacobian_IS_full = Matrix([diff(IS_curve, var) for var in variables_all])
+jacobian_Phillips = Matrix([diff(Phillips_curve, var) for var in variables_all])
+jacobian_Taylor = Matrix([diff(Taylor_rule, var) for var in variables_all])
+
+# Stack full Jacobian
+jacobian_full =
+Matrix.vstack(jacobian_IS_full.T, jacobian_Phillips.T, jacobian_Taylor.T)
+jacobian_full
