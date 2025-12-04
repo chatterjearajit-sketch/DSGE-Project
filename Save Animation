@@ -1,0 +1,3 @@
+anim.save('loss_surface_Tsteps.mp4', writer='ffmpeg', fps=1)
+from google.colab import files
+files.download('loss_surface_Tsteps.mp4')
