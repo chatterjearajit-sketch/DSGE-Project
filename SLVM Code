@@ -1,0 +1,53 @@
+!pip install numpyro jax jaxlib
+import jax.numpy as jnp
+from jax import random
+import numpyro
+import numpyro.distributions as dist
+from numpyro.infer import MCMC, NUTS
+from numpyro.contrib.control_flow import scan
+import matplotlib.pyplot as plt
+
+
+T = 100  # time periods
+y_obs = jnp.zeros((T, 3))  # observed variables: output, inflation, interest
+
+def sequential_latent_model(y_obs=None):
+    # Dimensions
+    state_dim = 3  # output gap, inflation, interest rate
+    obs_dim = 3    # GDP, CPI, nominal rate
+    shock_dim = 2  # technology and cost-push
+
+    # Priors on system matrices
+    A = numpyro.sample("A", dist.Normal(0, 0.5).expand([state_dim, state_dim]))
+    B = numpyro.sample("B", dist.Normal(0, 0.2).expand([state_dim, shock_dim]))
+    C = numpyro.sample("C", dist.Normal(1, 0.1).expand([obs_dim, state_dim]))
+
+    Q = numpyro.sample("Q", dist.InverseGamma(2, 2).expand([shock_dim]))
+    R = numpyro.sample("R", dist.InverseGamma(2, 2).expand([obs_dim]))
+
+    # Initial state prior
+    x0 = numpyro.sample("x_0", dist.Normal(0, 1).expand([state_dim]))
+
+    def transition(carry, t):
+        x_prev = carry
+        eps_t = numpyro.sample(f"eps_{t}", dist.Normal(0, jnp.sqrt(Q)))
+        x_t = A @ x_prev + B @ eps_t
+
+        y_mean = C @ x_t
+        numpyro.sample(f"y_{t}", dist.Normal(y_mean, jnp.sqrt(R)), obs=y_obs[t] if y_obs is not None else None)
+        return x_t, x_t
+
+    # Use scan to iterate over time
+    _, x_seq = scan(transition, x0, jnp.arange(T))
+    return x_seq
+
+# Running the model
+rng_key = random.PRNGKey(0)
+kernel = NUTS(sequential_latent_model)
+mcmc = MCMC(kernel, num_warmup=500, num_samples=1000)
+mcmc.run(rng_key, y_obs=y_obs)
+posterior_samples = mcmc.get_samples()
+
+# Posterior mean of latent states
+latent_states = jnp.mean(posterior_samples["x_0"], axis=0)
+print("Posterior mean of initial latent states:", latent_states)
