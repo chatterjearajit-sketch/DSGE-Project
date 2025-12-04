@@ -1,0 +1,28 @@
+# === Simulate Actual GDP Level y_t ===
+
+# Set initial log GDP y_0 = 0 for all sims
+gdp_levels = np.zeros_like(output_paths)  # shape: (n_sim, T)
+gdp_levels[:, 0] = 0.0  # log Y_0 = 0
+
+# Accumulate GDP levels from growth (output gap = Δy_t)
+for t in range(1, T):
+    gdp_levels[:, t] = gdp_levels[:, t-1] + output_paths[:, t]  # y_t = y_{t-1} + x_t
+
+# === Compute Real GDP Growth from Simulated Levels ===
+gdp_growth_from_levels = np.diff(gdp_levels, axis=1)  # shape: (n_sim, T-1)
+
+# === Detect Recession Based on Two Consecutive Periods of Negative GDP Growth ===
+def has_2_consec_negative_growth(path):
+    for t in range(1, len(path)):
+        if path[t] < 0 and path[t-1] < 0:
+            return True
+    return False
+
+recession_gdp_level_based = np.array([
+    has_2_consec_negative_growth(path) for path in gdp_growth_from_levels
+])
+recession_prob_gdp_levels = np.mean(recession_gdp_level_based)
+
+# === Print the Result ===
+print("\n--- Recession Based on Simulated GDP Levels ---")
+print(f"Probability of ≥2 consecutive quarters of negative real GDP growth: {recession_prob_gdp_levels:.3f}")
